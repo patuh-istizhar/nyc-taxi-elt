@@ -19,7 +19,12 @@ SELECT
     arg_max(size_bytes, loaded_at) AS size_bytes,
     arg_max(warnings, loaded_at) AS warnings,
     count(*) AS load_count,
-    date_diff('day', max(loaded_at), now()) AS days_since_load
+    date_diff('day', max(loaded_at), now()) AS days_since_load,
+    date_diff(
+        'month',
+        CAST(trip_month || '-01' AS DATE),
+        date_trunc('month', current_date)
+    ) AS months_behind
 FROM {schema}.pipeline_runs
 GROUP BY trip_month, taxi_type;
 """
@@ -30,8 +35,19 @@ SELECT
     filename,
     count(*) AS rows,
     min({pickup}) AS first_pickup,
-    max({dropoff}) AS last_dropoff
-FROM {schema}.{taxi_type}_tripdata
+    max({dropoff}) AS last_dropoff,
+    count(*) FILTER (
+        WHERE {pickup} < month_start - INTERVAL 1 MONTH
+           OR {dropoff} >= month_start + INTERVAL 2 MONTH
+    ) AS suspicious_rows
+FROM (
+    SELECT
+        *,
+        strptime(
+            regexp_extract(filename, '([0-9]{{4}}-[0-9]{{2}})', 1), '%Y-%m'
+        ) AS month_start
+    FROM {schema}.{taxi_type}_tripdata
+)
 GROUP BY filename
 """
 

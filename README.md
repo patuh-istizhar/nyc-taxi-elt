@@ -45,7 +45,8 @@ prefect.yaml     deployments (weekly + smoke)
 - Source columns outside the known schema are added to the table automatically; known
   columns missing from a file are stored as `NULL`.
 - After the insert the month is validated (row count, duplicate ids, null timestamps,
-  pickup month) and the run fails if a hard invariant breaks.
+  pickup month) and the run fails if a hard invariant breaks. Timestamps more than a
+  month outside the file's month are reported as warnings.
 - Every load is recorded in `zoomcamp.pipeline_runs` (run id, file, sha256, rows, warnings)
   and summarised in a Prefect artifact keyed `nyc-taxi-<YYYY-MM>`.
 - Scheduled flow runs are named `nyc-taxi-<taxi_type>` (the month is chosen at run time);
@@ -75,8 +76,8 @@ LIMIT 10;
 | Where | What |
 |---|---|
 | `zoomcamp.pipeline_runs` | one row per load: run name, rows, size, sha256, new columns, warnings |
-| `zoomcamp.pipeline_health` | latest load per month/taxi type + `days_since_load` |
-| `zoomcamp.trip_months` | row counts and pickup range per loaded file |
+| `zoomcamp.pipeline_health` | latest load per month/taxi type + `days_since_load`, `months_behind` |
+| `zoomcamp.trip_months` | row counts, pickup range, `suspicious_rows` per loaded file |
 | Prefect Artifacts | `nyc-taxi-<YYYY-MM>` summary of each run |
 | Flow run names | `nyc-taxi-<taxi_type>[-<YYYY-MM>]` |
 
@@ -95,6 +96,7 @@ notification integration (email/Slack) is wired up on purpose.
 
 ```bash
 uv sync --locked
+uv run python -c "import flows.nyc_taxi, flows.smoke"   # entrypoints import cleanly
 ruff check . --output-format=github
 ruff format --check .
 pytest -q

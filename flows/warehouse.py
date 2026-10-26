@@ -139,6 +139,11 @@ def attach_motherduck(conn: duckdb.DuckDBPyConnection, settings: Settings) -> No
     conn.execute(f"ATTACH {_sql_literal(_motherduck_uri(settings))} AS md;")
 
 
+def _shift_month(month: date, offset: int) -> date:
+    index = month.year * 12 + month.month - 1 + offset
+    return date(index // 12, index % 12 + 1, 1)
+
+
 def month_bounds(trip_month: str) -> tuple[date, date]:
     year_text, month_text = trip_month.split("-")
     year, month = int(year_text), int(month_text)
@@ -226,10 +231,22 @@ def _validate_load(
     pickup = _sql_ident(table_config["pickup_column"])
     dropoff = _sql_ident(table_config["dropoff_column"])
     start, end = month_bounds(trip_month)
+    # A few rows legitimately sit next to the month boundary; anything further
+    # than one month out is treated as an impossible timestamp.
+    lower = _shift_month(start, -1)
+    upper = _shift_month(end, 1)
 
-    rows, distinct_rows, null_pickup, null_dropoff, bad_order, out_of_month, negative_total = (
-        conn.execute(
-            f"""
+    (
+        rows,
+        distinct_rows,
+        null_pickup,
+        null_dropoff,
+        bad_order,
+        out_of_month,
+        negative_total,
+        impossible_time,
+    ) = conn.execute(
+        f"""
             SELECT
               COUNT(*),
               COUNT(DISTINCT unique_row_id),
@@ -240,12 +257,15 @@ def _validate_load(
                 WHERE {pickup} < TIMESTAMP {_sql_literal(str(start))}
                    OR {pickup} >= TIMESTAMP {_sql_literal(str(end))}
               ),
-              COUNT(*) FILTER (WHERE total_amount < 0)
+              COUNT(*) FILTER (WHERE total_amount < 0),
+              COUNT(*) FILTER (
+                WHERE {pickup} < TIMESTAMP {_sql_literal(str(lower))}
+                   OR {dropoff} >= TIMESTAMP {_sql_literal(str(upper))}
+              )
             FROM {table}
             WHERE filename = {_sql_literal(filename)};
             """
-        ).fetchone()
-    )
+    ).fetchone()
 
     if rows != rows_in_file:
         raise ValueError(
@@ -272,6 +292,11 @@ def _validate_load(
         warnings.append(message)
     if bad_order:
         warnings.append(f"{bad_order} baris dropoff sebelum pickup")
+    if impossible_time:
+        warnings.append(
+            f"{impossible_time} baris timestamp jauh di luar {trip_month} "
+            f"({lower:%Y-%m}..{upper:%Y-%m})"
+        )
     if negative_total:
         warnings.append(f"{negative_total} baris total_amount negatif")
     return warnings

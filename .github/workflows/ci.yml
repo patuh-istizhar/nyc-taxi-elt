@@ -31,6 +31,9 @@ jobs:
           uv python install 3.14
           uv sync --locked
 
+      - name: Import check
+        run: uv run python -c "import flows.nyc_taxi, flows.smoke"
+
       - name: Ruff lint
         run: uv run ruff check . --output-format=github
 

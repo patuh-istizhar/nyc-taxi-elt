@@ -268,18 +268,20 @@ def test_observability_views(tmp_path: Path, local_md: Path) -> None:
     try:
         health = conn.execute(
             """
-            SELECT taxi_type, trip_month, rows_loaded, rows_in_table, load_count
+            SELECT taxi_type, trip_month, rows_loaded, rows_in_table, load_count,
+                   months_behind
             FROM zoomcamp.pipeline_health
             """
         ).fetchall()
         months = conn.execute(
-            "SELECT taxi_type, filename, rows FROM zoomcamp.trip_months"
+            "SELECT taxi_type, filename, rows, suspicious_rows FROM zoomcamp.trip_months"
         ).fetchall()
     finally:
         conn.close()
 
-    assert health == [("yellow", "2019-01", 3, 3, 1)]
-    assert months == [("yellow", "yellow_tripdata_2019-01.parquet", 3)]
+    assert health[0][:5] == ("yellow", "2019-01", 3, 3, 1)
+    assert health[0][5] >= 50
+    assert months == [("yellow", "yellow_tripdata_2019-01.parquet", 3, 0)]
 
 
 def test_loaded_files_reads_the_audit_table(tmp_path: Path, local_md: Path) -> None:
@@ -294,3 +296,22 @@ def test_loaded_files_reads_the_audit_table(tmp_path: Path, local_md: Path) -> N
     }
     assert warehouse.loaded_files(SETTINGS, ["2026-09"]) == {}
     assert warehouse.loaded_files(SETTINGS, []) == {}
+
+
+def test_impossible_timestamp_only_warns(tmp_path: Path, local_md: Path) -> None:
+    parquet = write_yellow(
+        tmp_path / "future.parquet",
+        trips=TRIPS + [("1", "2019-01-05 08:00:00", "2088-01-24 07:28:25", "500", "501", 9.0)],
+    )
+    result = load(parquet)
+
+    assert result["rows_in_file"] == 4
+    assert any("timestamp jauh di luar" in warning for warning in result["warnings"])
+
+    observability.refresh_observability_views(SETTINGS)
+    conn = duckdb.connect(str(local_md))
+    try:
+        suspicious = conn.execute("SELECT suspicious_rows FROM zoomcamp.trip_months").fetchone()[0]
+    finally:
+        conn.close()
+    assert suspicious == 1
