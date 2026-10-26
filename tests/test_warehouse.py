@@ -280,3 +280,17 @@ def test_observability_views(tmp_path: Path, local_md: Path) -> None:
 
     assert health == [("yellow", "2019-01", 3, 3, 1)]
     assert months == [("yellow", "yellow_tripdata_2019-01.parquet", 3)]
+
+
+def test_loaded_files_reads_the_audit_table(tmp_path: Path, local_md: Path) -> None:
+    # No audit table yet (fresh warehouse).
+    assert warehouse.loaded_files(SETTINGS, ["2019-01"]) == {}
+
+    parquet = write_yellow(tmp_path / "audit.parquet")
+    load(parquet)
+
+    assert warehouse.loaded_files(SETTINGS, ["2019-01"]) == {
+        "2019-01": {"yellow_tripdata_2019-01.parquet"}
+    }
+    assert warehouse.loaded_files(SETTINGS, ["2026-09"]) == {}
+    assert warehouse.loaded_files(SETTINGS, []) == {}

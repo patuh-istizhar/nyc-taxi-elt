@@ -98,8 +98,8 @@ def upload_from_http(
         except requests.HTTPError as exc:
             if response.status_code in {403, 404}:
                 raise SourceUnavailableError(
-                    f"{source_uri} belum tersedia (HTTP {response.status_code}). TLC "
-                    "biasanya menerbitkan file 3-11 minggu setelah akhir bulan; "
+                    f"{source_uri} belum tersedia (HTTP {response.status_code}). "
+                    "TLC biasanya menerbitkan file beberapa minggu setelah akhir bulan; "
                     "jalankan ulang deployment setelah file muncul."
                 ) from exc
             raise ValueError(

@@ -17,26 +17,42 @@ def test_string_date_still_accepted() -> None:
     assert flow_module._resolve_trip_month("2019-02-01") == date(2019, 2, 1)
 
 
-def test_scheduled_run_processes_previous_month(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(flow_module, "_run_reference_date", lambda: date(2026, 3, 15))
-    assert flow_module._resolve_trip_month(None) == date(2026, 2, 1)
+def test_month_offset_crosses_year_boundary() -> None:
+    assert flow_module._month_offset(date(2026, 1, 1), -1) == date(2025, 12, 1)
+    assert flow_module._month_offset(date(2026, 12, 1), 2) == date(2027, 2, 1)
 
 
-def test_manual_run_mid_month_processes_previous_month(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(flow_module, "_run_reference_date", lambda: date(2026, 3, 26))
-    assert flow_module._resolve_trip_month(None) == date(2026, 2, 1)
+def test_newest_incomplete_prefers_last_month() -> None:
+    assert flow_module._newest_incomplete(date(2026, 10, 5), {}, ["yellow", "green"]) == date(
+        2026, 9, 1
+    )
 
 
-def test_run_on_first_of_month_processes_previous_month(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(flow_module, "_run_reference_date", lambda: date(2026, 3, 1))
-    assert flow_module._resolve_trip_month(None) == date(2026, 2, 1)
+def test_newest_incomplete_falls_back_to_late_month() -> None:
+    loaded = {
+        "2026-09": {
+            "yellow_tripdata_2026-09.parquet",
+            "green_tripdata_2026-09.parquet",
+        }
+    }
+    assert flow_module._newest_incomplete(date(2026, 10, 5), loaded, ["yellow", "green"]) == date(
+        2026, 8, 1
+    )
 
 
-def test_empty_string_processes_previous_month(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(flow_module, "_run_reference_date", lambda: date(2026, 3, 1))
-    assert flow_module._resolve_trip_month("  ") == date(2026, 2, 1)
+def test_newest_incomplete_needs_every_requested_file() -> None:
+    loaded = {"2026-09": {"yellow_tripdata_2026-09.parquet"}}
+    assert flow_module._newest_incomplete(date(2026, 10, 5), loaded, ["yellow", "green"]) == date(
+        2026, 9, 1
+    )
+    assert flow_module._newest_incomplete(date(2026, 10, 5), loaded, ["yellow"]) == date(2026, 8, 1)
+
+
+def test_newest_incomplete_returns_none_when_caught_up() -> None:
+    loaded: dict[str, set[str]] = {}
+    for month in range(4, 10):
+        loaded[f"2026-{month:02d}"] = {f"yellow_tripdata_2026-{month:02d}.parquet"}
+    assert flow_module._newest_incomplete(date(2026, 10, 5), loaded, ["yellow"]) is None
 
 
 def test_invalid_date_rejected() -> None:

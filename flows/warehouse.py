@@ -147,6 +147,48 @@ def month_bounds(trip_month: str) -> tuple[date, date]:
     return start, end
 
 
+def _table_exists(conn: duckdb.DuckDBPyConnection, schema: str, table: str) -> bool:
+    row = conn.execute(
+        """
+        SELECT 1
+        FROM duckdb_tables()
+        WHERE database_name = 'md' AND schema_name = ? AND table_name = ?
+        """,
+        [schema, table],
+    ).fetchone()
+    return row is not None
+
+
+def loaded_files(settings: Settings, trip_months: list[str]) -> dict[str, set[str]]:
+    """Filenames with a successful load per month, according to the audit table."""
+    if not trip_months:
+        return {}
+
+    schema = settings.motherduck_schema
+    conn = duckdb.connect()
+    try:
+        attach_motherduck(conn, settings)
+        if not _table_exists(conn, schema, "pipeline_runs"):
+            return {}
+        placeholders = ", ".join("?" for _ in trip_months)
+        rows = conn.execute(
+            f"""
+            SELECT trip_month, filename
+            FROM md.{schema}.pipeline_runs
+            WHERE trip_month IN ({placeholders})
+            GROUP BY trip_month, filename
+            """,
+            list(trip_months),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    loaded: dict[str, set[str]] = {}
+    for trip_month, filename in rows:
+        loaded.setdefault(str(trip_month), set()).add(str(filename))
+    return loaded
+
+
 def _describe_parquet(conn: duckdb.DuckDBPyConnection, parquet_path: Path) -> list[tuple[str, str]]:
     rows = conn.execute(
         f"DESCRIBE SELECT * FROM read_parquet({_sql_literal(str(parquet_path))});"

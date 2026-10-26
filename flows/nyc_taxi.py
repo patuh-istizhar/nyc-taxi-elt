@@ -9,7 +9,7 @@ from __future__ import annotations
 import hashlib
 import os
 import tempfile
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any, Literal, TypedDict
 
@@ -32,7 +32,7 @@ from flows.config import (
     get_settings,
 )
 from flows.observability import refresh_observability_views
-from flows.warehouse import LoadResult, load_parquet
+from flows.warehouse import LoadResult, load_parquet, loaded_files
 
 
 class TripFile(TypedDict):
@@ -44,11 +44,17 @@ class TripFile(TypedDict):
     source_uri: str
 
 
+LOOKBACK_MONTHS = 6
 TaxiType = Literal["all", "yellow", "green"]
 
 
 def _month_start(value: date) -> date:
     return date(value.year, value.month, 1)
+
+
+def _month_offset(month: date, offset: int) -> date:
+    index = month.year * 12 + month.month - 1 + offset
+    return date(index // 12, index % 12 + 1, 1)
 
 
 def _run_reference_date() -> date:
@@ -58,10 +64,7 @@ def _run_reference_date() -> date:
     return datetime.now(UTC).date()
 
 
-def _resolve_trip_month(trip_date: date | str | None) -> date:
-    if trip_date is None or (isinstance(trip_date, str) and not trip_date.strip()):
-        return _month_start(_month_start(_run_reference_date()) - timedelta(days=1))
-
+def _resolve_trip_month(trip_date: date | str) -> date:
     if isinstance(trip_date, datetime):
         trip_date = trip_date.date()
     elif isinstance(trip_date, str):
@@ -82,14 +85,35 @@ def _resolve_trip_month(trip_date: date | str | None) -> date:
     return month
 
 
+def _newest_incomplete(
+    reference: date, loaded: dict[str, set[str]], taxi_types: list[str]
+) -> date | None:
+    """Newest month in the lookback window that still misses a requested file.
+
+    Scanning back (instead of only looking at last month) lets the weekly
+    schedule pick up months TLC publishes late, without re-loading finished ones.
+    """
+    newest = _month_offset(_month_start(reference), -1)
+    for offset in range(LOOKBACK_MONTHS):
+        month = _month_offset(newest, -offset)
+        expected = {f"{taxi_type}_tripdata_{month:%Y-%m}.parquet" for taxi_type in taxi_types}
+        if not expected <= loaded.get(f"{month:%Y-%m}", set()):
+            return month
+    return None
+
+
 def _flow_run_name() -> str:
     try:
         parameters = flow_run.parameters or {}
     except Exception:
         return "nyc-taxi"
     taxi_type = str(parameters.get("taxi_type") or DEFAULT_TAXI_TYPE)
+    trip_date = parameters.get("trip_date")
+    if trip_date is None:
+        # The month is picked at run time, so the name cannot claim one.
+        return f"nyc-taxi-{taxi_type}"
     try:
-        month = _resolve_trip_month(parameters.get("trip_date"))
+        month = _resolve_trip_month(trip_date)
     except ValueError:
         return f"nyc-taxi-{taxi_type}"
     return f"nyc-taxi-{taxi_type}-{month:%Y-%m}"
@@ -104,6 +128,35 @@ def _resolve_taxi_types(taxi_type: str | None) -> list[str]:
             f"taxi_type tidak valid: {value!r}. Pilih salah satu: all, {', '.join(TAXI_TYPES)}."
         )
     return [value]
+
+
+@task
+def select_month(taxi_types: list[str]) -> date | None:
+    """Newest month that still missing a requested file, or None when caught up."""
+    logger = get_run_logger()
+    reference = _run_reference_date()
+    months = [
+        _month_offset(_month_start(reference), -offset) for offset in range(1, LOOKBACK_MONTHS + 1)
+    ]
+    loaded = loaded_files(get_settings(), [f"{month:%Y-%m}" for month in months])
+    month = _newest_incomplete(reference, loaded, taxi_types)
+    if month is None:
+        logger.info("Semua bulan %s..%s sudah termuat.", months[-1], months[0])
+    return month
+
+
+@task
+def pending_files(month: date, trips: list[TripFile], force_download: bool) -> list[TripFile]:
+    logger = get_run_logger()
+    if force_download:
+        return trips
+
+    loaded = loaded_files(get_settings(), [f"{month:%Y-%m}"]).get(f"{month:%Y-%m}", set())
+    pending = [trip for trip in trips if trip["filename"] not in loaded]
+    skipped = [trip["filename"] for trip in trips if trip["filename"] in loaded]
+    if skipped:
+        logger.info("Sudah termuat, dilewati: %s", ", ".join(skipped))
+    return pending
 
 
 @task(retries=2, retry_delay_seconds=30, timeout_seconds=600)
@@ -305,7 +358,7 @@ def refresh_views() -> None:
 
 @flow(
     name="nyc-taxi",
-    description="Monthly NYC TLC ELT: stream HTTP -> B2 -> MotherDuck.",
+    description="NYC TLC ELT: stream HTTP -> B2 -> MotherDuck.",
     log_prints=False,
     flow_run_name=_flow_run_name,
 )
@@ -314,21 +367,32 @@ def nyc_taxi(
     trip_date: date | None = None,
     force_download: bool = False,
 ) -> None:
-    """Monthly NYC TLC ELT: stream HTTP -> B2 -> MotherDuck.
+    """NYC TLC ELT: stream HTTP -> B2 -> MotherDuck.
 
     Args:
         taxi_type: all = yellow + green sekaligus, atau pilih salah satu jenis.
         trip_date: Tanggal di bulan data; hari diabaikan (yang dipakai tahun + bulan).
-            Kosongkan untuk bulan lalu.
-        force_download: Unduh ulang dari TLC walaupun file sudah ada di B2.
+            Kosongkan agar flow memilih bulan terbaru yang belum lengkap.
+        force_download: Muat ulang walaupun bulan itu sudah ada di warehouse.
     """
-    month = _resolve_trip_month(trip_date)
-    trips = plan(taxi_type, month, force_download)
+    logger = get_run_logger()
+    taxi_types = _resolve_taxi_types(taxi_type)
+    month = select_month(taxi_types) if trip_date is None else _resolve_trip_month(trip_date)
 
-    states = stream_to_b2.map(trips, return_state=True)
+    if month is None:
+        logger.info("Tidak ada bulan yang perlu dimuat.")
+        return
+
+    trips = plan(taxi_type, month, force_download)
+    pending = pending_files(month, trips, force_download)
+    if not pending:
+        logger.info("Bulan %s sudah lengkap; tidak ada yang dikerjakan.", f"{month:%Y-%m}")
+        return
+
+    states = stream_to_b2.map(pending, return_state=True)
     failures = [
         f"{trip['filename']}: {state.result(raise_on_failure=False)}"
-        for trip, state in zip(trips, states, strict=True)
+        for trip, state in zip(pending, states, strict=True)
         if not state.is_completed()
     ]
     if failures:

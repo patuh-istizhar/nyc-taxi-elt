@@ -12,8 +12,8 @@ pull:
       branch: main
 
 deployments:
-  - name: nyc-taxi-monthly
-    description: "Monthly NYC TLC ELT: stream HTTP -> B2 -> MotherDuck."
+  - name: nyc-taxi-weekly
+    description: "Weekly NYC TLC ELT: loads the newest incomplete month, skips finished ones."
     entrypoint: flows/nyc_taxi.py:nyc_taxi
     tags: ["nyc-taxi", "managed"]
     parameters:
@@ -21,7 +21,9 @@ deployments:
       force_download: false
     concurrency_limit: 1
     schedules:
-      - cron: "0 0 15 * *"
+      # Weekly: TLC publish dates slip, so a retry cadence works better than one
+      # fixed day. Already-loaded months make the run exit immediately.
+      - cron: "0 6 * * 1"
         timezone: UTC
         active: true
     work_pool:

@@ -28,14 +28,18 @@ flows/
   nyc_taxi.py    main flow (plan -> B2 -> MotherDuck -> report)
   smoke.py       B2 + MotherDuck connectivity check
 tests/           month resolution, loader and view tests
-prefect.yaml     deployments (monthly + smoke)
+prefect.yaml     deployments (weekly + smoke)
 ```
 
 ## Flow behaviour
 
-- Scheduled on the 15th: processes the month that just ended.
-- Manual runs accept `trip_date` (date picker; only year + month are used) and `taxi_type` (`all`, `yellow`, `green`).
+- Scheduled weekly (Monday 06:00 UTC). TLC publish dates slip, so each run loads the
+  newest month in the last 6 that is still incomplete and exits immediately when there
+  is nothing left to do.
+- Manual runs accept `trip_date` (date picker; only year + month are used) and `taxi_type`
+  (`all`, `yellow`, `green`).
 - Files are stored as `b2://zoomcamp/<taxi_type>_tripdata_<YYYY-MM>.parquet`.
+- A month/file that already has an audit row is skipped unless `force_download` is set.
 - Reloading the same file deletes its previous rows first, so runs are idempotent.
 - The delete + insert runs in one transaction: a failed reload keeps the previous rows.
 - Source columns outside the known schema are added to the table automatically; known
@@ -44,8 +48,8 @@ prefect.yaml     deployments (monthly + smoke)
   pickup month) and the run fails if a hard invariant breaks.
 - Every load is recorded in `zoomcamp.pipeline_runs` (run id, file, sha256, rows, warnings)
   and summarised in a Prefect artifact keyed `nyc-taxi-<YYYY-MM>`.
-- Flow runs are named `nyc-taxi-<taxi_type>-<YYYY-MM>`; deployment concurrency is 1,
-  so two loads never overlap.
+- Scheduled flow runs are named `nyc-taxi-<taxi_type>` (the month is chosen at run time);
+  manual runs use `nyc-taxi-<taxi_type>-<YYYY-MM>`. Deployment concurrency is 1.
 - Row id = `MD5(VendorID, pickup, dropoff, PULocationID, DOLocationID)`.
 
 B2 lifecycle on `zoomcamp` keeps only the latest version of each key
@@ -74,7 +78,7 @@ LIMIT 10;
 | `zoomcamp.pipeline_health` | latest load per month/taxi type + `days_since_load` |
 | `zoomcamp.trip_months` | row counts and pickup range per loaded file |
 | Prefect Artifacts | `nyc-taxi-<YYYY-MM>` summary of each run |
-| Flow run names | `nyc-taxi-<taxi_type>-<YYYY-MM>` |
+| Flow run names | `nyc-taxi-<taxi_type>[-<YYYY-MM>]` |
 
 ```sql
 SELECT * FROM zoomcamp.pipeline_health ORDER BY trip_month DESC;
