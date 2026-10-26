@@ -19,6 +19,7 @@ deployments:
     parameters:
       taxi_type: all
       force_download: false
+    concurrency_limit: 1
     schedules:
       - cron: "0 0 15 * *"
         timezone: UTC

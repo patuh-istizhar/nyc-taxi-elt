@@ -12,7 +12,7 @@ from pathlib import Path
 import duckdb
 import pytest
 
-from flows import warehouse
+from flows import observability, warehouse
 from flows.config import Settings
 
 SETTINGS = Settings(
@@ -62,6 +62,7 @@ def local_md(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         conn.execute(f"ATTACH '{db_path.as_posix()}' AS md;")
 
     monkeypatch.setattr(warehouse, "attach_motherduck", attach)
+    monkeypatch.setattr(observability, "attach_motherduck", attach)
     return db_path
 
 
@@ -87,17 +88,13 @@ def write_yellow(
             )
         for name, data_type in (extra or {}).items():
             conn.execute(f'ALTER TABLE t ADD COLUMN "{name}" {data_type};')
-            conn.execute(
-                f'UPDATE t SET "{name}" = 1.75 WHERE "{name}" IS NULL;'
-            )
+            conn.execute(f'UPDATE t SET "{name}" = 1.75 WHERE "{name}" IS NULL;')
 
         select = "*"
         if omit:
             excluded = ", ".join(f'"{name}"' for name in sorted(omit))
             select = f"* EXCLUDE ({excluded})"
-        conn.execute(
-            f"COPY (SELECT {select} FROM t) TO '{path.as_posix()}' (FORMAT PARQUET);"
-        )
+        conn.execute(f"COPY (SELECT {select} FROM t) TO '{path.as_posix()}' (FORMAT PARQUET);")
     finally:
         conn.close()
     return path
@@ -149,12 +146,8 @@ def test_reload_is_idempotent_and_audited(tmp_path: Path, local_md: Path) -> Non
 
     conn = duckdb.connect(str(local_md))
     try:
-        audited = conn.execute(
-            "SELECT COUNT(*) FROM zoomcamp.pipeline_runs"
-        ).fetchone()[0]
-        sha = conn.execute(
-            "SELECT DISTINCT sha256 FROM zoomcamp.pipeline_runs"
-        ).fetchone()[0]
+        audited = conn.execute("SELECT COUNT(*) FROM zoomcamp.pipeline_runs").fetchone()[0]
+        sha = conn.execute("SELECT DISTINCT sha256 FROM zoomcamp.pipeline_runs").fetchone()[0]
     finally:
         conn.close()
     assert audited == 2
@@ -190,9 +183,7 @@ def test_new_source_column_is_added(tmp_path: Path, local_md: Path) -> None:
     assert nulls == 0
 
 
-def test_missing_known_column_is_stored_as_null(
-    tmp_path: Path, local_md: Path
-) -> None:
+def test_missing_known_column_is_stored_as_null(tmp_path: Path, local_md: Path) -> None:
     parquet = write_yellow(
         tmp_path / "no_surcharge.parquet",
         omit={"congestion_surcharge"},
@@ -245,9 +236,7 @@ def test_failed_validation_rolls_back(tmp_path: Path, local_md: Path) -> None:
     assert table_rows(local_md, "yellow_tripdata_2019-01.parquet") == 3
 
 
-def test_out_of_month_within_threshold_only_warns(
-    tmp_path: Path, local_md: Path
-) -> None:
+def test_out_of_month_within_threshold_only_warns(tmp_path: Path, local_md: Path) -> None:
     many = [
         (
             "1",
@@ -261,10 +250,33 @@ def test_out_of_month_within_threshold_only_warns(
     ]
     parquet = write_yellow(
         tmp_path / "one_late.parquet",
-        trips=many
-        + [("1", "2018-12-31 23:00:00", "2018-12-31 23:10:00", "900", "901", 5.0)],
+        trips=many + [("1", "2018-12-31 23:00:00", "2018-12-31 23:10:00", "900", "901", 5.0)],
     )
     result = load(parquet)
 
     assert result["rows_in_file"] == 200
     assert any("di luar 2019-01" in warning for warning in result["warnings"])
+
+
+def test_observability_views(tmp_path: Path, local_md: Path) -> None:
+    parquet = write_yellow(tmp_path / "obs.parquet")
+    load(parquet)
+
+    observability.refresh_observability_views(SETTINGS)
+
+    conn = duckdb.connect(str(local_md))
+    try:
+        health = conn.execute(
+            """
+            SELECT taxi_type, trip_month, rows_loaded, rows_in_table, load_count
+            FROM zoomcamp.pipeline_health
+            """
+        ).fetchall()
+        months = conn.execute(
+            "SELECT taxi_type, filename, rows FROM zoomcamp.trip_months"
+        ).fetchall()
+    finally:
+        conn.close()
+
+    assert health == [("yellow", "2019-01", 3, 3, 1)]
+    assert months == [("yellow", "yellow_tripdata_2019-01.parquet", 3)]

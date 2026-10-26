@@ -30,6 +30,7 @@ from flows.config import (
     TAXI_TYPES,
     get_settings,
 )
+from flows.observability import refresh_observability_views
 from flows.warehouse import LoadResult, load_parquet
 
 
@@ -67,9 +68,7 @@ def _resolve_trip_month(trip_date: date | str | None) -> date:
         try:
             trip_date = date.fromisoformat(raw)
         except ValueError as exc:
-            raise ValueError(
-                f"trip_date tidak valid: {raw!r}. Gunakan format YYYY-MM-DD."
-            ) from exc
+            raise ValueError(f"trip_date tidak valid: {raw!r}. Gunakan format YYYY-MM-DD.") from exc
     elif not isinstance(trip_date, date):
         raise ValueError(f"trip_date tidak valid: {trip_date!r}.")
 
@@ -80,6 +79,19 @@ def _resolve_trip_month(trip_date: date | str | None) -> date:
         raise ValueError(f"Data untuk {month:%Y-%m} belum tersedia.")
 
     return month
+
+
+def _flow_run_name() -> str:
+    try:
+        parameters = flow_run.parameters or {}
+    except Exception:
+        return "nyc-taxi"
+    taxi_type = str(parameters.get("taxi_type") or DEFAULT_TAXI_TYPE)
+    try:
+        month = _resolve_trip_month(parameters.get("trip_date"))
+    except ValueError:
+        return f"nyc-taxi-{taxi_type}"
+    return f"nyc-taxi-{taxi_type}-{month:%Y-%m}"
 
 
 def _resolve_taxi_types(taxi_type: str | None) -> list[str]:
@@ -256,10 +268,7 @@ def publish_report(month: date, results: list[LoadResult]) -> None:
             f"**Finished:** {datetime.now(UTC):%Y-%m-%d %H:%M:%S} UTC",
             "",
             "sha256: "
-            + ", ".join(
-                f"`{result['sha256'][:16]}` ({result['filename']})"
-                for result in results
-            ),
+            + ", ".join(f"`{result['sha256'][:16]}` ({result['filename']})" for result in results),
         ]
     )
     key = f"nyc-taxi-{month:%Y-%m}"
@@ -271,10 +280,23 @@ def publish_report(month: date, results: list[LoadResult]) -> None:
     logger.info("Published artifact %s", key)
 
 
+@task
+def refresh_views() -> None:
+    logger = get_run_logger()
+    settings = get_settings()
+    refresh_observability_views(settings)
+    logger.info(
+        "Refreshed %s.pipeline_health and %s.trip_months",
+        settings.motherduck_schema,
+        settings.motherduck_schema,
+    )
+
+
 @flow(
     name="nyc-taxi",
     description="Monthly NYC TLC ELT: stream HTTP -> B2 -> MotherDuck.",
     log_prints=False,
+    flow_run_name=_flow_run_name,
 )
 def nyc_taxi(
     taxi_type: TaxiType = DEFAULT_TAXI_TYPE,
@@ -295,6 +317,7 @@ def nyc_taxi(
     uploaded = stream_to_b2.map(trips)
     results = [load_to_motherduck(trip) for trip in uploaded]
     publish_report(month, results)
+    refresh_views()
 
 
 if __name__ == "__main__":

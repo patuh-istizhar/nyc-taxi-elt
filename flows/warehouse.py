@@ -147,9 +147,7 @@ def month_bounds(trip_month: str) -> tuple[date, date]:
     return start, end
 
 
-def _describe_parquet(
-    conn: duckdb.DuckDBPyConnection, parquet_path: Path
-) -> list[tuple[str, str]]:
+def _describe_parquet(conn: duckdb.DuckDBPyConnection, parquet_path: Path) -> list[tuple[str, str]]:
     rows = conn.execute(
         f"DESCRIBE SELECT * FROM read_parquet({_sql_literal(str(parquet_path))});"
     ).fetchall()
@@ -170,8 +168,7 @@ def _ensure_table_columns(
     for name, data_type in table_config["columns"]:
         if name.lower() not in existing:
             conn.execute(
-                f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS "
-                f"{_sql_ident(name)} {data_type};"
+                f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {_sql_ident(name)} {data_type};"
             )
 
 
@@ -227,9 +224,7 @@ def _validate_load(
     warnings: list[str] = []
     if out_of_month:
         ratio = out_of_month / rows if rows else 0.0
-        message = (
-            f"{out_of_month} baris ({ratio:.2%}) pickup di luar {trip_month}"
-        )
+        message = f"{out_of_month} baris ({ratio:.2%}) pickup di luar {trip_month}"
         if ratio > MAX_OUT_OF_MONTH_RATIO:
             raise ValueError(f"Validasi gagal untuk {filename}: {message}.")
         warnings.append(message)
@@ -306,8 +301,7 @@ def load_parquet(
 
         conn.execute(f"CREATE SCHEMA IF NOT EXISTS md.{schema};")
         columns_ddl = ",\n                    ".join(
-            f"{_sql_ident(name)} {data_type}"
-            for name, data_type in table_config["columns"]
+            f"{_sql_ident(name)} {data_type}" for name, data_type in table_config["columns"]
         )
         conn.execute(
             f"""
@@ -326,9 +320,7 @@ def load_parquet(
             raise ValueError(f"File {filename} tidak punya kolom.")
 
         source_by_lower = {name.lower(): (name, data_type) for name, data_type in source_columns}
-        known_by_lower = {
-            name.lower(): data_type for name, data_type in table_config["columns"]
-        }
+        known_by_lower = {name.lower(): data_type for name, data_type in table_config["columns"]}
 
         required = [
             "VendorID",
@@ -356,8 +348,7 @@ def load_parquet(
             )
         for name, data_type in extra_columns:
             conn.execute(
-                f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS "
-                f"{_sql_ident(name)} {data_type};"
+                f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {_sql_ident(name)} {data_type};"
             )
 
         missing_columns = [
@@ -368,17 +359,13 @@ def load_parquet(
         for name, data_type in table_config["columns"]:
             source = source_by_lower.get(name.lower())
             if source is None:
-                select_exprs.append(
-                    f"CAST(NULL AS {data_type}) AS {_sql_ident(name)}"
-                )
+                select_exprs.append(f"CAST(NULL AS {data_type}) AS {_sql_ident(name)}")
             else:
                 select_exprs.append(
                     f"CAST({_sql_ident(source[0])} AS {data_type}) AS {_sql_ident(name)}"
                 )
         for name, data_type in extra_columns:
-            select_exprs.append(
-                f"CAST({_sql_ident(name)} AS {data_type}) AS {_sql_ident(name)}"
-            )
+            select_exprs.append(f"CAST({_sql_ident(name)} AS {data_type}) AS {_sql_ident(name)}")
 
         payload_columns = (
             ["unique_row_id", "filename"]
@@ -415,22 +402,14 @@ def load_parquet(
         if rows_in_file == 0:
             raise ValueError(f"File {filename} tidak berisi baris data.")
 
-        rows_before = int(
-            conn.execute(f"SELECT COUNT(*) FROM {table};").fetchone()[0]
-        )
+        rows_before = int(conn.execute(f"SELECT COUNT(*) FROM {table};").fetchone()[0])
         loaded_at = datetime.now(UTC)
 
         conn.execute("BEGIN TRANSACTION;")
         try:
-            conn.execute(
-                f"DELETE FROM {table} WHERE filename = {_sql_literal(filename)};"
-            )
-            conn.execute(
-                f"INSERT INTO {table} ({column_sql}) SELECT {column_sql} FROM dedup;"
-            )
-            rows_after = int(
-                conn.execute(f"SELECT COUNT(*) FROM {table};").fetchone()[0]
-            )
+            conn.execute(f"DELETE FROM {table} WHERE filename = {_sql_literal(filename)};")
+            conn.execute(f"INSERT INTO {table} ({column_sql}) SELECT {column_sql} FROM dedup;")
+            rows_after = int(conn.execute(f"SELECT COUNT(*) FROM {table};").fetchone()[0])
             warnings = _validate_load(
                 conn,
                 table=table,

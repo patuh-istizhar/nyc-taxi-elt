@@ -1,5 +1,7 @@
 # NYC Taxi ELT
 
+[![CI](https://github.com/patuh-istizhar/nyc-taxi-prefect/actions/workflows/ci.yml/badge.svg)](https://github.com/patuh-istizhar/nyc-taxi-prefect/actions/workflows/ci.yml)
+
 Monthly ELT for NYC TLC trip data, orchestrated with Prefect Cloud and running on
 Prefect Managed infrastructure (serverless, no worker).
 
@@ -42,6 +44,8 @@ prefect.yaml     deployments (monthly + smoke)
   pickup month) and the run fails if a hard invariant breaks.
 - Every load is recorded in `zoomcamp.pipeline_runs` (run id, file, sha256, rows, warnings)
   and summarised in a Prefect artifact keyed `nyc-taxi-<YYYY-MM>`.
+- Flow runs are named `nyc-taxi-<taxi_type>-<YYYY-MM>`; deployment concurrency is 1,
+  so two loads never overlap.
 - Row id = `MD5(VendorID, pickup, dropoff, PULocationID, DOLocationID)`.
 
 B2 lifecycle on `zoomcamp` keeps only the latest version of each key
@@ -61,6 +65,38 @@ FROM zoomcamp.pipeline_runs
 ORDER BY loaded_at DESC
 LIMIT 10;
 ```
+
+## Observability
+
+| Where | What |
+|---|---|
+| `zoomcamp.pipeline_runs` | one row per load: run name, rows, size, sha256, new columns, warnings |
+| `zoomcamp.pipeline_health` | latest load per month/taxi type + `days_since_load` |
+| `zoomcamp.trip_months` | row counts and pickup range per loaded file |
+| Prefect Artifacts | `nyc-taxi-<YYYY-MM>` summary of each run |
+| Flow run names | `nyc-taxi-<taxi_type>-<YYYY-MM>` |
+
+```sql
+SELECT * FROM zoomcamp.pipeline_health ORDER BY trip_month DESC;
+SELECT * FROM zoomcamp.trip_months ORDER BY filename;
+```
+
+The views are refreshed at the end of every flow run. For alerts, create a
+Prefect automation with trigger **Flow run failed**, filter on flow `nyc-taxi`,
+and action **Send notification** (Slack or email).
+
+## CI
+
+`.github/workflows/ci.yml` runs on every push and pull request:
+
+```bash
+uv sync --locked
+ruff check . --output-format=github
+ruff format --check .
+pytest -q
+```
+
+Public repositories get GitHub-hosted runners for free.
 
 ## Configuration
 

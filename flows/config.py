@@ -67,9 +67,7 @@ def get_settings() -> Settings:
         b2_key_id=_env_or_secret("B2_KEY_ID"),
         b2_app_key=_env_or_secret("B2_APP_KEY"),
         b2_bucket=_env_or_secret("B2_BUCKET", DEFAULT_B2_BUCKET),
-        motherduck_database=_env_or_secret(
-            "MOTHERDUCK_DATABASE", DEFAULT_MOTHERDUCK_DATABASE
-        ),
+        motherduck_database=_env_or_secret("MOTHERDUCK_DATABASE", DEFAULT_MOTHERDUCK_DATABASE),
         motherduck_token=_env_or_secret("MOTHERDUCK_TOKEN"),
         motherduck_schema=schema,
     )

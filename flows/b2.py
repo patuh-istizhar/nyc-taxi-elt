@@ -96,14 +96,10 @@ def upload_from_http(
                 f"Gagal mengunduh {source_uri} (HTTP {response.status_code})."
             ) from exc
 
-        content_encoding = (
-            response.headers.get("Content-Encoding") or "identity"
-        ).lower()
+        content_encoding = (response.headers.get("Content-Encoding") or "identity").lower()
         raw_length = response.headers.get("Content-Length")
         expected_bytes = (
-            int(raw_length)
-            if raw_length and content_encoding in {"", "identity"}
-            else None
+            int(raw_length) if raw_length and content_encoding in {"", "identity"} else None
         )
 
         upload = client.create_multipart_upload(
@@ -119,13 +115,9 @@ def upload_from_http(
         last_magic = b""
 
         try:
-            for part_number, part in enumerate(
-                _iter_parts(response, DOWNLOAD_CHUNK_SIZE), start=1
-            ):
+            for part_number, part in enumerate(_iter_parts(response, DOWNLOAD_CHUNK_SIZE), start=1):
                 if part_number == 1 and part[:4] != PARQUET_MAGIC:
-                    raise ValueError(
-                        f"File dari {source_uri} bukan parquet (magic bytes salah)."
-                    )
+                    raise ValueError(f"File dari {source_uri} bukan parquet (magic bytes salah).")
 
                 hasher.update(part)
                 total_bytes += len(part)
@@ -143,9 +135,7 @@ def upload_from_http(
             if not parts:
                 raise ValueError(f"File dari {source_uri} kosong.")
             if last_magic != PARQUET_MAGIC:
-                raise ValueError(
-                    f"File dari {source_uri} bukan parquet (footer rusak)."
-                )
+                raise ValueError(f"File dari {source_uri} bukan parquet (footer rusak).")
 
             client.complete_multipart_upload(
                 Bucket=bucket,
@@ -155,9 +145,7 @@ def upload_from_http(
             )
         except BaseException:
             try:
-                client.abort_multipart_upload(
-                    Bucket=bucket, Key=key, UploadId=upload_id
-                )
+                client.abort_multipart_upload(Bucket=bucket, Key=key, UploadId=upload_id)
             except Exception:
                 logger.warning(
                     "Gagal abort multipart upload %s untuk b2://%s/%s",
@@ -173,14 +161,10 @@ def upload_from_http(
         try:
             client.delete_object(Bucket=bucket, Key=key)
         except Exception:
-            logger.warning(
-                "Gagal menghapus objek rusak b2://%s/%s", bucket, key, exc_info=True
-            )
+            logger.warning("Gagal menghapus objek rusak b2://%s/%s", bucket, key, exc_info=True)
 
     if expected_bytes is not None and total_bytes != expected_bytes:
-        _discard(
-            f"Ukuran unduhan tidak cocok: {total_bytes} != Content-Length {expected_bytes}"
-        )
+        _discard(f"Ukuran unduhan tidak cocok: {total_bytes} != Content-Length {expected_bytes}")
         raise ValueError(
             f"Ukuran {key} tidak cocok: diterima {total_bytes} byte, "
             f"diharapkan {expected_bytes} byte."
@@ -188,9 +172,7 @@ def upload_from_http(
 
     head = client.head_object(Bucket=bucket, Key=key)
     if head["ContentLength"] != total_bytes:
-        _discard(
-            f"Ukuran objek B2 tidak cocok: {head['ContentLength']} != {total_bytes}"
-        )
+        _discard(f"Ukuran objek B2 tidak cocok: {head['ContentLength']} != {total_bytes}")
         raise ValueError(
             f"Ukuran objek b2://{bucket}/{key} tidak cocok: "
             f"{head['ContentLength']} != {total_bytes} byte."
