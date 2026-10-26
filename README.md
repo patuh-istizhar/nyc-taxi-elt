@@ -68,3 +68,17 @@ uvx ruff check flows tests
 # deploy
 uv run prefect deploy --all
 ```
+
+### Keeping the Cloud workspace clean
+
+Every `@flow` executed locally is registered in whichever Prefect profile is
+active, so ad-hoc scripts and tests can leave stray flows behind. Tests are
+isolated through `tests/conftest.py` (temporary local server). For local script
+runs, use a profile without a Cloud API URL:
+
+```bash
+prefect profile create local      # no PREFECT_API_URL -> ephemeral server
+prefect profile use local
+# ... run scripts ...
+prefect profile use default       # switch back to Prefect Cloud
+```
