@@ -11,13 +11,14 @@ import os
 import tempfile
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
-from typing import Literal, TypedDict
+from typing import Any, Literal, TypedDict
 
 from prefect import flow, get_run_logger, task
 from prefect.artifacts import create_markdown_artifact
 from prefect.runtime import flow_run
 
 from flows.b2 import (
+    SourceUnavailableError,
     bucket_exists,
     build_client,
     download_object,
@@ -130,7 +131,17 @@ def plan(taxi_type: str | None, month: date, force_download: bool) -> list[TripF
     return trips
 
 
-@task(retries=3, retry_delay_seconds=60, timeout_seconds=1800)
+def should_retry_upload(task: Any, task_run: Any, state: Any) -> bool:
+    """Skip retries when TLC has not published the file yet."""
+    return not isinstance(state.result(raise_on_failure=False), SourceUnavailableError)
+
+
+@task(
+    retries=3,
+    retry_delay_seconds=60,
+    retry_condition_fn=should_retry_upload,
+    timeout_seconds=1800,
+)
 def stream_to_b2(trip: TripFile) -> TripFile:
     logger = get_run_logger()
     settings = get_settings()
@@ -314,7 +325,16 @@ def nyc_taxi(
     month = _resolve_trip_month(trip_date)
     trips = plan(taxi_type, month, force_download)
 
-    uploaded = stream_to_b2.map(trips)
+    states = stream_to_b2.map(trips, return_state=True)
+    failures = [
+        f"{trip['filename']}: {state.result(raise_on_failure=False)}"
+        for trip, state in zip(trips, states, strict=True)
+        if not state.is_completed()
+    ]
+    if failures:
+        raise ValueError("Upload ke B2 gagal untuk " + "; ".join(failures))
+
+    uploaded = [state.result() for state in states]
     results = [load_to_motherduck(trip) for trip in uploaded]
     publish_report(month, results)
     refresh_views()

@@ -77,6 +77,10 @@ def _iter_parts(response: requests.Response, part_size: int) -> Iterator[bytes]:
         yield bytes(buffer)
 
 
+class SourceUnavailableError(ValueError):
+    """Raised when TLC has not published the requested file yet."""
+
+
 def upload_from_http(
     source_uri: str,
     client,
@@ -92,6 +96,12 @@ def upload_from_http(
         try:
             response.raise_for_status()
         except requests.HTTPError as exc:
+            if response.status_code in {403, 404}:
+                raise SourceUnavailableError(
+                    f"{source_uri} belum tersedia (HTTP {response.status_code}). TLC "
+                    "biasanya menerbitkan file 3-11 minggu setelah akhir bulan; "
+                    "jalankan ulang deployment setelah file muncul."
+                ) from exc
             raise ValueError(
                 f"Gagal mengunduh {source_uri} (HTTP {response.status_code})."
             ) from exc
