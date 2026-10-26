@@ -40,6 +40,7 @@ class TripFile(TypedDict):
 
 
 TaxiType = Literal["all", "yellow", "green"]
+Month = Literal[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
 
 
 def _month_start(value: date) -> date:
@@ -53,18 +54,19 @@ def _run_reference_date() -> date:
     return datetime.now(UTC).date()
 
 
-def _resolve_trip_month(trip_month: str | None) -> date:
-    raw = str(trip_month or "").strip()
+def _resolve_trip_month(trip_year: int | None, trip_month: int | None) -> date:
+    if (trip_year is None) != (trip_month is None):
+        raise ValueError(
+            "Isi trip_year dan trip_month bersamaan, atau kosongkan keduanya untuk bulan lalu."
+        )
 
-    if raw:
-        try:
-            month = datetime.strptime(raw, "%Y-%m").date()
-        except ValueError as exc:
-            raise ValueError(
-                f"trip_month tidak valid: {raw!r}. Gunakan format YYYY-MM (contoh: 2019-01)."
-            ) from exc
-    else:
-        month = _month_start(_month_start(_run_reference_date()) - timedelta(days=1))
+    if trip_year is None:
+        return _month_start(_month_start(_run_reference_date()) - timedelta(days=1))
+
+    try:
+        month = date(int(trip_year), int(trip_month), 1)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"Periode tidak valid: {trip_year}-{trip_month}.") from exc
 
     today = date.today()
     if (month.year, month.month) > (today.year, today.month):
@@ -201,17 +203,19 @@ def load_to_motherduck(trip: TripFile) -> None:
 )
 def nyc_taxi(
     taxi_type: TaxiType = DEFAULT_TAXI_TYPE,
-    trip_month: str | None = None,
+    trip_year: int | None = None,
+    trip_month: Month | None = None,
     force_download: bool = False,
 ) -> None:
     """Monthly NYC TLC ELT: stream HTTP -> B2 -> MotherDuck.
 
     Args:
         taxi_type: all = yellow + green sekaligus, atau pilih salah satu jenis.
-        trip_month: Bulan data, format YYYY-MM (contoh 2019-01). Kosongkan untuk bulan lalu.
+        trip_year: Tahun data, contoh 2019. Isi bersama trip_month.
+        trip_month: Bulan data 1-12. Kosongkan trip_year + trip_month untuk bulan lalu.
         force_download: Unduh ulang dari TLC walaupun file sudah ada di B2.
     """
-    month = _resolve_trip_month(trip_month)
+    month = _resolve_trip_month(trip_year, trip_month)
     trips = plan(taxi_type, month, force_download)
 
     uploaded = stream_to_b2.map(trips)
