@@ -32,7 +32,7 @@ prefect.yaml     deployments (monthly + smoke)
 ## Flow behaviour
 
 - Scheduled on the 15th: processes the month that just ended.
-- Manual runs accept `trip_date` (`YYYY-MM-DD`) and `taxi_type` (`all`, `yellow`, `green`).
+- Manual runs accept `trip_month` (`YYYY-MM`) and `taxi_type` (`all`, `yellow`, `green`).
 - Files are stored as `b2://zoomcamp/<taxi_type>_tripdata_<YYYY-MM>.parquet`.
 - Reloading the same file deletes its previous rows first, so runs are idempotent.
 - Row id = `MD5(VendorID, pickup, dropoff, PULocationID, DOLocationID)`.
@@ -56,7 +56,7 @@ set -a && . ./.env && set +a
 uv run python -m flows.smoke
 
 # load one month
-uv run python -c "from flows.nyc_taxi import nyc_taxi; nyc_taxi(taxi_type='green', trip_date='2019-01-01')"
+uv run python -c "from flows.nyc_taxi import nyc_taxi; nyc_taxi(taxi_type='green', trip_month='2019-01')"
 
 # tests
 uv run pytest -q

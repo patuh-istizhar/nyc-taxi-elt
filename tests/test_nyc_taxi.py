@@ -9,8 +9,8 @@ import pytest
 from flows import nyc_taxi as flow_module
 
 
-def test_trip_date_overrides_month() -> None:
-    assert flow_module._resolve_trip_month("2019-01-15") == date(2019, 1, 1)
+def test_trip_month_overrides_default() -> None:
+    assert flow_module._resolve_trip_month("2019-01") == date(2019, 1, 1)
 
 
 def test_scheduled_run_processes_previous_month(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -28,14 +28,19 @@ def test_run_on_first_of_month_processes_previous_month(monkeypatch: pytest.Monk
     assert flow_module._resolve_trip_month("") == date(2026, 2, 1)
 
 
-def test_invalid_trip_date() -> None:
-    with pytest.raises(ValueError, match="trip_date tidak valid"):
+def test_invalid_trip_month() -> None:
+    with pytest.raises(ValueError, match="trip_month tidak valid"):
         flow_module._resolve_trip_month("01-2019")
+
+
+def test_full_date_rejected() -> None:
+    with pytest.raises(ValueError, match="trip_month tidak valid"):
+        flow_module._resolve_trip_month("2019-01-01")
 
 
 def test_future_month_rejected() -> None:
     with pytest.raises(ValueError, match="belum tersedia"):
-        flow_module._resolve_trip_month(f"{date.today().year + 1}-01-01")
+        flow_module._resolve_trip_month(f"{date.today().year + 1}-01")
 
 
 @pytest.mark.parametrize(

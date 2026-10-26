@@ -10,7 +10,7 @@ import os
 import tempfile
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
-from typing import TypedDict
+from typing import Literal, TypedDict
 
 from prefect import flow, get_run_logger, task
 from prefect.runtime import flow_run
@@ -39,6 +39,9 @@ class TripFile(TypedDict):
     force_download: bool
 
 
+TaxiType = Literal["all", "yellow", "green"]
+
+
 def _month_start(value: date) -> date:
     return date(value.year, value.month, 1)
 
@@ -50,17 +53,16 @@ def _run_reference_date() -> date:
     return datetime.now(UTC).date()
 
 
-def _resolve_trip_month(trip_date: str | None) -> date:
-    raw = str(trip_date or "").strip()
+def _resolve_trip_month(trip_month: str | None) -> date:
+    raw = str(trip_month or "").strip()
 
     if raw:
         try:
-            parsed = date.fromisoformat(raw)
+            month = datetime.strptime(raw, "%Y-%m").date()
         except ValueError as exc:
             raise ValueError(
-                f"trip_date tidak valid: {raw!r}. Gunakan format YYYY-MM-DD."
+                f"trip_month tidak valid: {raw!r}. Gunakan format YYYY-MM (contoh: 2019-01)."
             ) from exc
-        month = _month_start(parsed)
     else:
         month = _month_start(_month_start(_run_reference_date()) - timedelta(days=1))
 
@@ -198,11 +200,18 @@ def load_to_motherduck(trip: TripFile) -> None:
     log_prints=False,
 )
 def nyc_taxi(
-    taxi_type: str = DEFAULT_TAXI_TYPE,
-    trip_date: str | None = None,
+    taxi_type: TaxiType = DEFAULT_TAXI_TYPE,
+    trip_month: str | None = None,
     force_download: bool = False,
 ) -> None:
-    month = _resolve_trip_month(trip_date)
+    """Monthly NYC TLC ELT: stream HTTP -> B2 -> MotherDuck.
+
+    Args:
+        taxi_type: all = yellow + green sekaligus, atau pilih salah satu jenis.
+        trip_month: Bulan data, format YYYY-MM (contoh 2019-01). Kosongkan untuk bulan lalu.
+        force_download: Unduh ulang dari TLC walaupun file sudah ada di B2.
+    """
+    month = _resolve_trip_month(trip_month)
     trips = plan(taxi_type, month, force_download)
 
     uploaded = stream_to_b2.map(trips)
