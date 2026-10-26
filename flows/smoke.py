@@ -2,17 +2,14 @@
 
 from __future__ import annotations
 
-import logging
 from datetime import UTC, datetime
 
 import duckdb
-from prefect import flow, task
+from prefect import flow, get_run_logger, task
 
 from flows.b2 import bucket_exists, build_client
 from flows.config import get_settings
 from flows.warehouse import attach_motherduck
-
-logger = logging.getLogger(__name__)
 
 SMOKE_KEY = "_smoke/healthcheck.txt"
 
@@ -67,6 +64,7 @@ def check_motherduck() -> str:
 
 @flow(name="nyc-taxi-smoke", log_prints=False)
 def smoke() -> None:
+    logger = get_run_logger()
     logger.info(check_b2())
     logger.info(check_motherduck())
 

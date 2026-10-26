@@ -52,7 +52,13 @@ def test_invalid_taxi_type() -> None:
 
 
 def test_plan_filenames() -> None:
-    trips = flow_module.plan.fn("all", date(2019, 1, 1), False)
+    from prefect import flow
+
+    @flow
+    def run_plan() -> list[dict[str, object]]:
+        return flow_module.plan.fn("all", date(2019, 1, 1), False)
+
+    trips = run_plan()
     assert [trip["filename"] for trip in trips] == [
         "yellow_tripdata_2019-01.parquet",
         "green_tripdata_2019-01.parquet",

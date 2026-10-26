@@ -6,14 +6,13 @@ Scheduled runs fire on the 15th and process the month that just ended. Set
 
 from __future__ import annotations
 
-import logging
 import os
 import tempfile
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import TypedDict
 
-from prefect import flow, task
+from prefect import flow, get_run_logger, task
 from prefect.runtime import flow_run
 
 from flows.b2 import (
@@ -30,8 +29,6 @@ from flows.config import (
     get_settings,
 )
 from flows.warehouse import load_parquet
-
-logger = logging.getLogger(__name__)
 
 
 class TripFile(TypedDict):
@@ -87,6 +84,7 @@ def _resolve_taxi_types(taxi_type: str | None) -> list[str]:
 
 @task(retries=2, retry_delay_seconds=30, timeout_seconds=600)
 def plan(taxi_type: str | None, month: date, force_download: bool) -> list[TripFile]:
+    logger = get_run_logger()
     taxi_types = _resolve_taxi_types(taxi_type)
     trips: list[TripFile] = [
         {
@@ -109,6 +107,7 @@ def plan(taxi_type: str | None, month: date, force_download: bool) -> list[TripF
 
 @task(retries=3, retry_delay_seconds=60, timeout_seconds=1800)
 def stream_to_b2(trip: TripFile) -> TripFile:
+    logger = get_run_logger()
     settings = get_settings()
     client = build_client(settings)
 
@@ -131,6 +130,13 @@ def stream_to_b2(trip: TripFile) -> TripFile:
 
     source_base = os.environ.get("NYC_TLC_SOURCE_BASE", DEFAULT_SOURCE_BASE).rstrip("/")
     source_uri = f"{source_base}/{trip['filename']}"
+
+    logger.info(
+        "Streaming %s to b2://%s/%s",
+        source_uri,
+        settings.b2_bucket,
+        trip["filename"],
+    )
 
     size_bytes, sha256 = upload_from_http(
         source_uri,
@@ -155,6 +161,7 @@ def stream_to_b2(trip: TripFile) -> TripFile:
 
 @task(retries=2, retry_delay_seconds=60, timeout_seconds=1800)
 def load_to_motherduck(trip: TripFile) -> None:
+    logger = get_run_logger()
     settings = get_settings()
     client = build_client(settings)
 
