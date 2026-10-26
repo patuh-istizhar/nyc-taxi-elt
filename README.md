@@ -37,6 +37,9 @@ prefect.yaml     deployments (monthly + smoke)
 - Reloading the same file deletes its previous rows first, so runs are idempotent.
 - Row id = `MD5(VendorID, pickup, dropoff, PULocationID, DOLocationID)`.
 
+B2 lifecycle on `zoomcamp` keeps only the latest version of each key
+(`daysFromHidingToDeleting = 1`), so re-uploads do not pile up old versions.
+
 ## Configuration
 
 Non-secret values live in `.env` (local) or `prefect.yaml` `job_variables.env` (cloud).
