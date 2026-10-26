@@ -1,0 +1,35 @@
+[project]
+name = "prefect-project"
+version = "0.1.0"
+description = "NYC TLC taxi data ELT orchestrated by Prefect."
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "boto3>=1.43.118",
+    "duckdb==1.5.6",
+    "prefect>=3.9.0",
+    "requests>=2.34.2",
+]
+
+[tool.uv]
+package = false
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "ruff>=0.17.2",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.ruff]
+line-length = 100
+target-version = "py314"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["flows"]

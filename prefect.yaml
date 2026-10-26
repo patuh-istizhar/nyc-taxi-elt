@@ -1,0 +1,58 @@
+# Deployment configuration for the NYC Taxi ELT pipeline.
+# Managed by Prefect Cloud (prefect:managed work pool).
+name: nyc-taxi
+prefect-version: 3.9.0
+
+build: null
+push: null
+
+pull:
+  - prefect.deployments.steps.git_clone:
+      repository: https://github.com/USER/nyc-taxi-prefect.git
+      branch: main
+
+deployments:
+  - name: nyc-taxi-monthly
+    description: "Monthly NYC TLC ELT: stream HTTP -> B2 -> MotherDuck."
+    entrypoint: flows/nyc_taxi.py:nyc_taxi
+    tags: ["nyc-taxi", "managed"]
+    parameters:
+      taxi_type: all
+      force_download: false
+    schedules:
+      - cron: "0 0 15 * *"
+        timezone: UTC
+        active: true
+    work_pool:
+      name: nyc-taxi-managed
+      job_variables:
+        pip_packages:
+          - duckdb==1.5.6
+          - boto3>=1.43.118
+          - requests>=2.34.2
+        env:
+          B2_ENDPOINT: https://s3.us-east-005.backblazeb2.com
+          B2_REGION: us-east-005
+          B2_BUCKET: zoomcamp
+          MOTHERDUCK_DATABASE: nyc_taxi
+          MOTHERDUCK_SCHEMA: zoomcamp
+          NYC_TLC_SOURCE_BASE: https://d37ci6vzurychx.cloudfront.net/trip-data
+
+  - name: nyc-taxi-smoke
+    description: "Connectivity check for B2 and MotherDuck."
+    entrypoint: flows/smoke.py:smoke
+    tags: ["nyc-taxi", "managed"]
+    work_pool:
+      name: nyc-taxi-managed
+      job_variables:
+        pip_packages:
+          - duckdb==1.5.6
+          - boto3>=1.43.118
+          - requests>=2.34.2
+        env:
+          B2_ENDPOINT: https://s3.us-east-005.backblazeb2.com
+          B2_REGION: us-east-005
+          B2_BUCKET: zoomcamp
+          MOTHERDUCK_DATABASE: nyc_taxi
+          MOTHERDUCK_SCHEMA: zoomcamp
+          NYC_TLC_SOURCE_BASE: https://d37ci6vzurychx.cloudfront.net/trip-data
