@@ -22,10 +22,10 @@ TLC parquet (HTTP)  ->  Backblaze B2  ->  MotherDuck (DuckDB)
 flows/
   config.py      settings + Secret block fallback
   b2.py          S3-compatible B2 helpers (multipart streaming upload)
-  warehouse.py   MotherDuck attach + idempotent load
-  nyc_taxi.py    main flow (plan -> B2 -> MotherDuck)
+  warehouse.py   schema-aware MotherDuck loader + validation + audit
+  nyc_taxi.py    main flow (plan -> B2 -> MotherDuck -> report)
   smoke.py       B2 + MotherDuck connectivity check
-tests/           month/parameter resolution tests
+tests/           month resolution + loader tests
 prefect.yaml     deployments (monthly + smoke)
 ```
 
@@ -35,10 +35,32 @@ prefect.yaml     deployments (monthly + smoke)
 - Manual runs accept `trip_date` (date picker; only year + month are used) and `taxi_type` (`all`, `yellow`, `green`).
 - Files are stored as `b2://zoomcamp/<taxi_type>_tripdata_<YYYY-MM>.parquet`.
 - Reloading the same file deletes its previous rows first, so runs are idempotent.
+- The delete + insert runs in one transaction: a failed reload keeps the previous rows.
+- Source columns outside the known schema are added to the table automatically; known
+  columns missing from a file are stored as `NULL`.
+- After the insert the month is validated (row count, duplicate ids, null timestamps,
+  pickup month) and the run fails if a hard invariant breaks.
+- Every load is recorded in `zoomcamp.pipeline_runs` (run id, file, sha256, rows, warnings)
+  and summarised in a Prefect artifact keyed `nyc-taxi-<YYYY-MM>`.
 - Row id = `MD5(VendorID, pickup, dropoff, PULocationID, DOLocationID)`.
 
 B2 lifecycle on `zoomcamp` keeps only the latest version of each key
 (`daysFromHidingToDeleting = 1`), so re-uploads do not pile up old versions.
+
+## Warehouse tables
+
+| Table | Contents |
+|---|---|
+| `zoomcamp.yellow_tripdata` | yellow trips (one row per unique trip) |
+| `zoomcamp.green_tripdata` | green trips |
+| `zoomcamp.pipeline_runs` | load audit log |
+
+```sql
+SELECT trip_month, taxi_type, filename, rows_loaded, loaded_at, warnings
+FROM zoomcamp.pipeline_runs
+ORDER BY loaded_at DESC
+LIMIT 10;
+```
 
 ## Configuration
 

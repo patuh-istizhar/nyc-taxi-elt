@@ -6,6 +6,7 @@ Scheduled runs fire on the 15th and process the month that just ended. Set
 
 from __future__ import annotations
 
+import hashlib
 import os
 import tempfile
 from datetime import UTC, date, datetime, timedelta
@@ -13,6 +14,7 @@ from pathlib import Path
 from typing import Literal, TypedDict
 
 from prefect import flow, get_run_logger, task
+from prefect.artifacts import create_markdown_artifact
 from prefect.runtime import flow_run
 
 from flows.b2 import (
@@ -28,7 +30,7 @@ from flows.config import (
     TAXI_TYPES,
     get_settings,
 )
-from flows.warehouse import load_parquet
+from flows.warehouse import LoadResult, load_parquet
 
 
 class TripFile(TypedDict):
@@ -37,6 +39,7 @@ class TripFile(TypedDict):
     year: str
     month: str
     force_download: bool
+    source_uri: str
 
 
 TaxiType = Literal["all", "yellow", "green"]
@@ -94,6 +97,7 @@ def _resolve_taxi_types(taxi_type: str | None) -> list[str]:
 def plan(taxi_type: str | None, month: date, force_download: bool) -> list[TripFile]:
     logger = get_run_logger()
     taxi_types = _resolve_taxi_types(taxi_type)
+    source_base = os.environ.get("NYC_TLC_SOURCE_BASE", DEFAULT_SOURCE_BASE).rstrip("/")
     trips: list[TripFile] = [
         {
             "filename": f"{value}_tripdata_{month:%Y-%m}.parquet",
@@ -101,6 +105,7 @@ def plan(taxi_type: str | None, month: date, force_download: bool) -> list[TripF
             "year": f"{month.year:04d}",
             "month": f"{month.month:02d}",
             "force_download": bool(force_download),
+            "source_uri": f"{source_base}/{value}_tripdata_{month:%Y-%m}.parquet",
         }
         for value in taxi_types
     ]
@@ -136,8 +141,7 @@ def stream_to_b2(trip: TripFile) -> TripFile:
             )
             return trip
 
-    source_base = os.environ.get("NYC_TLC_SOURCE_BASE", DEFAULT_SOURCE_BASE).rstrip("/")
-    source_uri = f"{source_base}/{trip['filename']}"
+    source_uri = trip["source_uri"]
 
     logger.info(
         "Streaming %s to b2://%s/%s",
@@ -167,8 +171,18 @@ def stream_to_b2(trip: TripFile) -> TripFile:
     return trip
 
 
+def _file_digest(path: Path) -> tuple[int, str]:
+    hasher = hashlib.sha256()
+    size = 0
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            hasher.update(chunk)
+            size += len(chunk)
+    return size, hasher.hexdigest()
+
+
 @task(retries=2, retry_delay_seconds=60, timeout_seconds=1800)
-def load_to_motherduck(trip: TripFile) -> None:
+def load_to_motherduck(trip: TripFile) -> LoadResult:
     logger = get_run_logger()
     settings = get_settings()
     client = build_client(settings)
@@ -181,23 +195,80 @@ def load_to_motherduck(trip: TripFile) -> None:
             trip["filename"],
         )
         download_object(client, settings.b2_bucket, trip["filename"], parquet_path)
+        size_bytes, sha256 = _file_digest(parquet_path)
 
-        incoming, rows_before, rows_after = load_parquet(
+        result = load_parquet(
             parquet_path,
             filename=trip["filename"],
             taxi_type=trip["taxi_type"],
+            trip_month=f"{trip['year']}-{trip['month']}",
+            source_uri=trip["source_uri"],
+            size_bytes=size_bytes,
+            sha256=sha256,
             settings=settings,
+            flow_run_id=str(flow_run.id),
+            flow_run_name=flow_run.name,
         )
 
     logger.info(
         "Loaded %s rows from %s into %s.%s_tripdata (%s -> %s rows)",
-        incoming,
+        result["rows_in_file"],
         trip["filename"],
         settings.motherduck_schema,
         trip["taxi_type"],
-        rows_before,
-        rows_after,
+        result["rows_before"],
+        result["rows_after"],
     )
+    if result["new_columns"]:
+        logger.info("New source columns added: %s", ", ".join(result["new_columns"]))
+    if result["missing_columns"]:
+        logger.info(
+            "Columns absent from this file (stored as NULL): %s",
+            ", ".join(result["missing_columns"]),
+        )
+    for warning in result["warnings"]:
+        logger.warning("%s: %s", trip["filename"], warning)
+    return result
+
+
+@task
+def publish_report(month: date, results: list[LoadResult]) -> None:
+    logger = get_run_logger()
+    total = sum(result["rows_in_file"] for result in results)
+    lines = [
+        f"## NYC Taxi load - {month:%Y-%m}",
+        "",
+        "| Taxi | File | Rows | In table | Size | New columns | Warnings |",
+        "|---|---|---:|---:|---:|---|---|",
+    ]
+    for result in results:
+        lines.append(
+            f"| {result['taxi_type']} | `{result['filename']}` "
+            f"| {result['rows_in_file']:,} | {result['rows_after']:,} "
+            f"| {result['size_bytes'] / 1e6:.1f} MB "
+            f"| {', '.join(result['new_columns']) or '-'} "
+            f"| {'; '.join(result['warnings']) or '-'} |"
+        )
+    lines.extend(
+        [
+            "",
+            f"**Rows loaded:** {total:,}",
+            f"**Finished:** {datetime.now(UTC):%Y-%m-%d %H:%M:%S} UTC",
+            "",
+            "sha256: "
+            + ", ".join(
+                f"`{result['sha256'][:16]}` ({result['filename']})"
+                for result in results
+            ),
+        ]
+    )
+    key = f"nyc-taxi-{month:%Y-%m}"
+    create_markdown_artifact(
+        key=key,
+        markdown="\n".join(lines),
+        description=f"Load summary for {month:%Y-%m}",
+    )
+    logger.info("Published artifact %s", key)
 
 
 @flow(
@@ -222,8 +293,8 @@ def nyc_taxi(
     trips = plan(taxi_type, month, force_download)
 
     uploaded = stream_to_b2.map(trips)
-    for trip in uploaded:
-        load_to_motherduck(trip)
+    results = [load_to_motherduck(trip) for trip in uploaded]
+    publish_report(month, results)
 
 
 if __name__ == "__main__":
