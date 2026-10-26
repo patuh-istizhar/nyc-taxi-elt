@@ -42,8 +42,10 @@ def test_unpublished_file_raises_source_unavailable(monkeypatch: pytest.MonkeyPa
 def test_unpublished_file_is_not_retried() -> None:
     state = Failed(data=b2.SourceUnavailableError("belum tersedia"))
     assert flow_module.should_retry_upload(None, None, state) is False
+    assert flow_module._is_unavailable(state) is True
 
 
 def test_transient_error_is_retried() -> None:
     state = Failed(data=RuntimeError("connection reset"))
     assert flow_module.should_retry_upload(None, None, state) is True
+    assert flow_module._is_unavailable(state) is False

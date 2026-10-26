@@ -13,7 +13,7 @@ pull:
 
 deployments:
   - name: nyc-taxi-weekly
-    description: "Weekly NYC TLC ELT: loads the newest incomplete month, skips finished ones."
+    description: "Weekly NYC TLC ELT: loads every incomplete month it can, skips finished ones."
     entrypoint: flows/nyc_taxi.py:nyc_taxi
     tags: ["nyc-taxi", "managed"]
     parameters:

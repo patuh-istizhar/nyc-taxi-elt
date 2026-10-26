@@ -13,9 +13,14 @@ flowchart LR
 
 ## How it works
 
-- A weekly run picks the newest month that is still incomplete, loads yellow and green,
-  then writes an audit row and refreshes the views.
+- A weekly run loads every incomplete month in the last six months, newest first, so a
+  month TLC published late is not stuck behind a newer one. Each loaded month writes an
+  audit row and refreshes the views.
 - A month that already has an audit row is skipped; `force_download=true` reloads it.
+- A month whose source file is not published yet (HTTP 403/404) is skipped and the run
+  stays green while it is within three months of the run date. Past that grace period,
+  or on any real error, the run fails. An explicit `trip_date` fails right away if its
+  file is missing.
 - Reloading a file deletes its previous rows first, so runs are idempotent. A failed
   load rolls back and keeps the old data.
 - Source columns outside the known schema are added automatically; known columns

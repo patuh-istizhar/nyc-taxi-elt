@@ -1,7 +1,7 @@
 """NYC Taxi ELT: stream TLC parquet to B2, then load MotherDuck.
 
-Scheduled runs fire on the 15th and process the month that just ended. Set
-``trip_date`` to override the month for manual runs.
+Scheduled runs load every incomplete month in the lookback window. Set
+``trip_date`` to load one specific month instead.
 """
 
 from __future__ import annotations
@@ -45,6 +45,9 @@ class TripFile(TypedDict):
 
 
 LOOKBACK_MONTHS = 6
+# A month is allowed to be this late before the run fails. TLC's observed lag is
+# under three months, so a newer gap is "still coming", not an incident.
+GRACE_MONTHS = 3
 TaxiType = Literal["all", "yellow", "green"]
 
 
@@ -85,21 +88,33 @@ def _resolve_trip_month(trip_date: date | str) -> date:
     return month
 
 
-def _newest_incomplete(
+def _expected_files(month: date, taxi_types: list[str]) -> set[str]:
+    return {f"{taxi_type}_tripdata_{month:%Y-%m}.parquet" for taxi_type in taxi_types}
+
+
+def _incomplete_months(
     reference: date, loaded: dict[str, set[str]], taxi_types: list[str]
-) -> date | None:
-    """Newest month in the lookback window that still misses a requested file.
+) -> list[date]:
+    """Incomplete months in the lookback window, newest first.
 
     Scanning back (instead of only looking at last month) lets the weekly
     schedule pick up months TLC publishes late, without re-loading finished ones.
     """
     newest = _month_offset(_month_start(reference), -1)
-    for offset in range(LOOKBACK_MONTHS):
-        month = _month_offset(newest, -offset)
-        expected = {f"{taxi_type}_tripdata_{month:%Y-%m}.parquet" for taxi_type in taxi_types}
-        if not expected <= loaded.get(f"{month:%Y-%m}", set()):
-            return month
-    return None
+    months = [_month_offset(newest, -offset) for offset in range(LOOKBACK_MONTHS)]
+    return [
+        month
+        for month in months
+        if not _expected_files(month, taxi_types) <= loaded.get(f"{month:%Y-%m}", set())
+    ]
+
+
+def _months_behind(month: date, reference: date) -> int:
+    return (reference.year - month.year) * 12 + (reference.month - month.month)
+
+
+def _stale_months(months: list[date], reference: date) -> list[date]:
+    return [month for month in months if _months_behind(month, reference) > GRACE_MONTHS]
 
 
 def _flow_run_name() -> str:
@@ -131,18 +146,18 @@ def _resolve_taxi_types(taxi_type: str | None) -> list[str]:
 
 
 @task
-def select_month(taxi_types: list[str]) -> date | None:
-    """Newest month that still missing a requested file, or None when caught up."""
+def select_months(taxi_types: list[str]) -> list[date]:
+    """Incomplete months in the lookback window, newest first."""
     logger = get_run_logger()
     reference = _run_reference_date()
     months = [
         _month_offset(_month_start(reference), -offset) for offset in range(1, LOOKBACK_MONTHS + 1)
     ]
     loaded = loaded_files(get_settings(), [f"{month:%Y-%m}" for month in months])
-    month = _newest_incomplete(reference, loaded, taxi_types)
-    if month is None:
-        logger.info("Semua bulan %s..%s sudah termuat.", months[-1], months[0])
-    return month
+    incomplete = _incomplete_months(reference, loaded, taxi_types)
+    if incomplete:
+        logger.info("Bulan belum lengkap: %s", ", ".join(f"{month:%Y-%m}" for month in incomplete))
+    return incomplete
 
 
 @task
@@ -184,9 +199,13 @@ def plan(taxi_type: str | None, month: date, force_download: bool) -> list[TripF
     return trips
 
 
+def _is_unavailable(state: Any) -> bool:
+    return isinstance(state.result(raise_on_failure=False), SourceUnavailableError)
+
+
 def should_retry_upload(task: Any, task_run: Any, state: Any) -> bool:
     """Skip retries when TLC has not published the file yet."""
-    return not isinstance(state.result(raise_on_failure=False), SourceUnavailableError)
+    return not _is_unavailable(state)
 
 
 @task(
@@ -372,36 +391,73 @@ def nyc_taxi(
     Args:
         taxi_type: all = yellow + green sekaligus, atau pilih salah satu jenis.
         trip_date: Tanggal di bulan data; hari diabaikan (yang dipakai tahun + bulan).
-            Kosongkan agar flow memilih bulan terbaru yang belum lengkap.
+            Kosongkan agar flow memuat semua bulan yang belum lengkap.
         force_download: Muat ulang walaupun bulan itu sudah ada di warehouse.
     """
     logger = get_run_logger()
     taxi_types = _resolve_taxi_types(taxi_type)
-    month = select_month(taxi_types) if trip_date is None else _resolve_trip_month(trip_date)
+    explicit_month = trip_date is not None
+    reference = _run_reference_date()
 
-    if month is None:
+    months = (
+        [_resolve_trip_month(trip_date)] if trip_date is not None else select_months(taxi_types)
+    )
+
+    if not months:
         logger.info("Tidak ada bulan yang perlu dimuat.")
         return
 
-    trips = plan(taxi_type, month, force_download)
-    pending = pending_files(month, trips, force_download)
-    if not pending:
-        logger.info("Bulan %s sudah lengkap; tidak ada yang dikerjakan.", f"{month:%Y-%m}")
-        return
+    unavailable: list[date] = []
+    for month in months:
+        label = f"{month:%Y-%m}"
+        trips = plan(taxi_type, month, force_download)
+        pending = pending_files(month, trips, force_download)
+        if not pending:
+            logger.info("Bulan %s sudah lengkap; tidak ada yang dikerjakan.", label)
+            continue
 
-    states = stream_to_b2.map(pending, return_state=True)
-    failures = [
-        f"{trip['filename']}: {state.result(raise_on_failure=False)}"
-        for trip, state in zip(pending, states, strict=True)
-        if not state.is_completed()
-    ]
-    if failures:
-        raise ValueError("Upload ke B2 gagal untuk " + "; ".join(failures))
+        states = stream_to_b2.map(pending, return_state=True)
+        failed = [
+            (trip, state)
+            for trip, state in zip(pending, states, strict=True)
+            if not state.is_completed()
+        ]
+        unpublished = [trip for trip, state in failed if _is_unavailable(state)]
+        errors = [
+            f"{trip['filename']}: {state.result(raise_on_failure=False)}"
+            for trip, state in failed
+            if not _is_unavailable(state)
+        ]
+        if errors:
+            raise ValueError("Upload ke B2 gagal untuk " + "; ".join(errors))
 
-    uploaded = [state.result() for state in states]
-    results = [load_to_motherduck(trip) for trip in uploaded]
-    publish_report(month, results)
-    refresh_views()
+        if unpublished:
+            names = ", ".join(trip["filename"] for trip in unpublished)
+            if explicit_month:
+                raise ValueError(
+                    f"{names} belum tersedia di TLC. Jalankan ulang deployment setelah file muncul."
+                )
+            logger.warning("Belum tersedia di TLC, dilewati: %s (%s)", names, label)
+            unavailable.append(month)
+
+        uploaded = [state.result() for state in states if state.is_completed()]
+        if uploaded:
+            results = [load_to_motherduck(trip) for trip in uploaded]
+            publish_report(month, results)
+            refresh_views()
+
+    stale = _stale_months(unavailable, reference)
+    if stale:
+        raise ValueError(
+            f"Bulan belum terbit melewati batas {GRACE_MONTHS} bulan: "
+            + ", ".join(f"{month:%Y-%m}" for month in stale)
+        )
+    if unavailable:
+        logger.warning(
+            "Menunggu terbit (masih dalam batas %d bulan): %s",
+            GRACE_MONTHS,
+            ", ".join(f"{month:%Y-%m}" for month in unavailable),
+        )
 
 
 if __name__ == "__main__":

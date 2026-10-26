@@ -22,37 +22,60 @@ def test_month_offset_crosses_year_boundary() -> None:
     assert flow_module._month_offset(date(2026, 12, 1), 2) == date(2027, 2, 1)
 
 
-def test_newest_incomplete_prefers_last_month() -> None:
-    assert flow_module._newest_incomplete(date(2026, 10, 5), {}, ["yellow", "green"]) == date(
-        2026, 9, 1
-    )
+def test_incomplete_months_newest_first() -> None:
+    months = flow_module._incomplete_months(date(2026, 10, 5), {}, ["yellow", "green"])
+    assert months[0] == date(2026, 9, 1)
+    assert months[-1] == date(2026, 4, 1)
+    assert len(months) == flow_module.LOOKBACK_MONTHS
 
 
-def test_newest_incomplete_falls_back_to_late_month() -> None:
+def test_incomplete_months_skips_complete_months() -> None:
     loaded = {
         "2026-09": {
             "yellow_tripdata_2026-09.parquet",
             "green_tripdata_2026-09.parquet",
-        }
+        },
+        "2026-08": {
+            "yellow_tripdata_2026-08.parquet",
+            "green_tripdata_2026-08.parquet",
+        },
     }
-    assert flow_module._newest_incomplete(date(2026, 10, 5), loaded, ["yellow", "green"]) == date(
+    assert flow_module._incomplete_months(date(2026, 10, 5), loaded, ["yellow", "green"]) == [
+        date(2026, 7, 1),
+        date(2026, 6, 1),
+        date(2026, 5, 1),
+        date(2026, 4, 1),
+    ]
+
+
+def test_incomplete_months_needs_every_requested_file() -> None:
+    loaded = {"2026-09": {"yellow_tripdata_2026-09.parquet"}}
+    assert flow_module._incomplete_months(date(2026, 10, 5), loaded, ["yellow", "green"])[
+        0
+    ] == date(2026, 9, 1)
+    assert flow_module._incomplete_months(date(2026, 10, 5), loaded, ["yellow"])[0] == date(
         2026, 8, 1
     )
 
 
-def test_newest_incomplete_needs_every_requested_file() -> None:
-    loaded = {"2026-09": {"yellow_tripdata_2026-09.parquet"}}
-    assert flow_module._newest_incomplete(date(2026, 10, 5), loaded, ["yellow", "green"]) == date(
-        2026, 9, 1
-    )
-    assert flow_module._newest_incomplete(date(2026, 10, 5), loaded, ["yellow"]) == date(2026, 8, 1)
-
-
-def test_newest_incomplete_returns_none_when_caught_up() -> None:
+def test_incomplete_months_empty_when_caught_up() -> None:
     loaded: dict[str, set[str]] = {}
     for month in range(4, 10):
         loaded[f"2026-{month:02d}"] = {f"yellow_tripdata_2026-{month:02d}.parquet"}
-    assert flow_module._newest_incomplete(date(2026, 10, 5), loaded, ["yellow"]) is None
+    assert flow_module._incomplete_months(date(2026, 10, 5), loaded, ["yellow"]) == []
+
+
+def test_months_behind() -> None:
+    assert flow_module._months_behind(date(2026, 9, 1), date(2026, 10, 27)) == 1
+    assert flow_module._months_behind(date(2026, 1, 1), date(2026, 10, 27)) == 9
+    assert flow_module._months_behind(date(2025, 12, 1), date(2026, 1, 2)) == 1
+
+
+def test_stale_months_respects_grace() -> None:
+    within = [date(2026, 9, 1), date(2026, 7, 1)]
+    beyond = [date(2026, 6, 1), date(2026, 4, 1)]
+    assert flow_module._stale_months(within, date(2026, 10, 27)) == []
+    assert flow_module._stale_months(beyond, date(2026, 10, 27)) == beyond
 
 
 def test_invalid_date_rejected() -> None:
