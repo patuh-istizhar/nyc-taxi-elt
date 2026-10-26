@@ -8,34 +8,13 @@ no worker to maintain.
 
 ```mermaid
 flowchart LR
-    TLC["NYC TLC<br/>parquet over HTTP"]
-
-    subgraph P["Prefect flow"]
-        B2[("Backblaze B2<br/>raw copy")]
-        LOAD["Schema-aware load<br/>+ validation"]
-    end
-
-    TLC -->|stream + sha256| B2
-    B2 -->|download| LOAD
-    LOAD -->|one transaction| MD[("MotherDuck<br/>nyc_taxi.zoomcamp")]
-    MD --> V["pipeline_health<br/>trip_months"]
+    TLC[NYC TLC] --> B2[B2 raw copy] --> MD[MotherDuck]
 ```
 
-## How a run works
+## How it works
 
-```mermaid
-flowchart TD
-    S["Weekly run<br/>Mon 06:00 UTC"] --> M{"Newest incomplete<br/>month in the last 6?"}
-    M -->|none| D["Exit green"]
-    M -->|found| P["Plan yellow + green"]
-    P --> K{"Already loaded?"}
-    K -->|yes| D
-    K -->|no| U["Stream to B2"]
-    U --> L["Delete + insert + validate<br/>single transaction"]
-    L --> R["Audit row + artifact"]
-    R --> Y["Refresh views"]
-```
-
+- A weekly run picks the newest month that is still incomplete, loads yellow and green,
+  then writes an audit row and refreshes the views.
 - A month that already has an audit row is skipped; `force_download=true` reloads it.
 - Reloading a file deletes its previous rows first, so runs are idempotent. A failed
   load rolls back and keeps the old data.
