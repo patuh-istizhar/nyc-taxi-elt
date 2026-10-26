@@ -27,7 +27,7 @@ flows/
   warehouse.py   schema-aware MotherDuck loader + validation + audit
   nyc_taxi.py    main flow (plan -> B2 -> MotherDuck -> report)
   smoke.py       B2 + MotherDuck connectivity check
-tests/           month resolution + loader tests
+tests/           month resolution, loader and view tests
 prefect.yaml     deployments (monthly + smoke)
 ```
 
@@ -81,9 +81,9 @@ SELECT * FROM zoomcamp.pipeline_health ORDER BY trip_month DESC;
 SELECT * FROM zoomcamp.trip_months ORDER BY filename;
 ```
 
-The views are refreshed at the end of every flow run. For alerts, create a
-Prefect automation with trigger **Flow run failed**, filter on flow `nyc-taxi`,
-and action **Send notification** (Slack or email).
+The views are refreshed at the end of every flow run. A failed run is visible in
+the Prefect run list and leaves `pipeline_health.days_since_load` growing; no
+notification integration (email/Slack) is wired up on purpose.
 
 ## CI
 

@@ -35,7 +35,7 @@ FROM {schema}.{taxi_type}_tripdata
 GROUP BY filename
 """
 
-TRIP_TABLES = {
+TRIP_TIME_COLUMNS = {
     "yellow": ("tpep_pickup_datetime", "tpep_dropoff_datetime"),
     "green": ("lpep_pickup_datetime", "lpep_dropoff_datetime"),
 }
@@ -80,7 +80,7 @@ def refresh_observability_views(settings: Settings) -> None:
                 pickup=pickup,
                 dropoff=dropoff,
             )
-            for taxi_type, (pickup, dropoff) in TRIP_TABLES.items()
+            for taxi_type, (pickup, dropoff) in TRIP_TIME_COLUMNS.items()
             if f"{taxi_type}_tripdata" in tables
         ]
         if parts:

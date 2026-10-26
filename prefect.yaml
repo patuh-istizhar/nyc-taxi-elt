@@ -26,7 +26,9 @@ deployments:
         active: true
     work_pool:
       name: nyc-taxi-managed
-      job_variables:
+      # Both deployments run the same code, so the smoke deployment reuses this
+      # exact runtime block through the YAML anchor.
+      job_variables: &job_variables
         pip_packages:
           - duckdb==1.5.6
           - boto3>=1.43.118
@@ -45,15 +47,4 @@ deployments:
     tags: ["nyc-taxi", "managed"]
     work_pool:
       name: nyc-taxi-managed
-      job_variables:
-        pip_packages:
-          - duckdb==1.5.6
-          - boto3>=1.43.118
-          - requests>=2.34.2
-        env:
-          B2_ENDPOINT: https://s3.us-east-005.backblazeb2.com
-          B2_REGION: us-east-005
-          B2_BUCKET: zoomcamp
-          MOTHERDUCK_DATABASE: nyc_taxi
-          MOTHERDUCK_SCHEMA: zoomcamp
-          NYC_TLC_SOURCE_BASE: https://d37ci6vzurychx.cloudfront.net/trip-data
+      job_variables: *job_variables
