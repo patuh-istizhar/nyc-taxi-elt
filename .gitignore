@@ -1,21 +1,14 @@
-# Python-generated files
-__pycache__/
-*.py[oc]
-build/
-dist/
-wheels/
-*.egg-info
-
-# Virtual environments
-.venv
-
-# Local secrets and config
 .env
-
-# Tooling caches
+.venv/
+__pycache__/
+*.py[cod]
+*.duckdb
+*.duckdb.wal
+data/
 .pytest_cache/
 .ruff_cache/
-
-# Local data
-*.duckdb
+.mypy_cache/
+dist/
+*.egg-info/
+.DS_Store
 *.parquet

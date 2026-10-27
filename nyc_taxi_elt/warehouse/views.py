@@ -1,14 +1,13 @@
-"""Read-only observability views over the loaded trip tables."""
+"""Monitoring views (pipeline_health, trip_months) over the trip tables."""
 
 from __future__ import annotations
 
-import duckdb
-
-from flows.config import Settings
-from flows.warehouse import attach_motherduck
+from nyc_taxi_elt.config import Settings
+from nyc_taxi_elt.tlc import TRIP_TABLES, table_name
+from nyc_taxi_elt.warehouse.connection import connect_warehouse
 
 PIPELINE_HEALTH_SQL = """
-CREATE OR REPLACE VIEW {schema}.pipeline_health AS
+CREATE OR REPLACE VIEW pipeline_health AS
 SELECT
     trip_month,
     taxi_type,
@@ -25,7 +24,7 @@ SELECT
         CAST(trip_month || '-01' AS DATE),
         date_trunc('month', current_date)
     ) AS months_behind
-FROM {schema}.pipeline_runs
+FROM pipeline_runs
 GROUP BY trip_month, taxi_type;
 """
 
@@ -46,62 +45,53 @@ FROM (
         strptime(
             regexp_extract(filename, '([0-9]{{4}}-[0-9]{{2}})', 1), '%Y-%m'
         ) AS month_start
-    FROM {schema}.{taxi_type}_tripdata
+    FROM {taxi_type}_tripdata
 )
 GROUP BY filename
 """
 
 TRIP_TIME_COLUMNS = {
-    "yellow": ("tpep_pickup_datetime", "tpep_dropoff_datetime"),
-    "green": ("lpep_pickup_datetime", "lpep_dropoff_datetime"),
+    taxi_type: (spec["pickup_column"], spec["dropoff_column"])
+    for taxi_type, spec in TRIP_TABLES.items()
 }
 
 
-def _available_tables(conn: duckdb.DuckDBPyConnection, schema: str) -> set[str]:
+def _available_tables(conn, schema: str) -> set[str]:
     rows = conn.execute(
         """
         SELECT table_name
         FROM duckdb_tables()
-        WHERE database_name = 'md' AND schema_name = ?
+        WHERE schema_name = ?
+          AND database_name = current_database()
         """,
         [schema],
     ).fetchall()
     return {str(row[0]) for row in rows}
 
 
-def refresh_observability_views(settings: Settings) -> None:
+def refresh_monitoring_views(settings: Settings) -> None:
     """Create or replace the views used to monitor the pipeline.
 
     Views are only created for tables that already exist, so a fresh database
     (or a run that loaded a single taxi type) does not break the refresh.
+    Unqualified names are intentional: after USE schema, views stay portable
+    whatever catalog name the database is opened under.
     """
-    schema = settings.motherduck_schema
-    conn = duckdb.connect()
-    try:
-        attach_motherduck(conn, settings)
-        conn.execute(f"CREATE SCHEMA IF NOT EXISTS md.{schema};")
-        # Views must not embed the catalog alias: MotherDuck share clones attach
-        # the same database under a different name, and a stored "md." prefix
-        # would not resolve there.
-        conn.execute("USE md;")
+    schema = settings.warehouse_schema
+    with connect_warehouse(settings) as conn:
         tables = _available_tables(conn, schema)
 
         if "pipeline_runs" in tables:
-            conn.execute(PIPELINE_HEALTH_SQL.format(schema=schema))
+            conn.execute(PIPELINE_HEALTH_SQL)
 
         parts = [
             TRIP_MONTHS_TEMPLATE.format(
-                schema=schema,
                 taxi_type=taxi_type,
                 pickup=pickup,
                 dropoff=dropoff,
             )
             for taxi_type, (pickup, dropoff) in TRIP_TIME_COLUMNS.items()
-            if f"{taxi_type}_tripdata" in tables
+            if table_name(taxi_type) in tables
         ]
         if parts:
-            conn.execute(
-                f"CREATE OR REPLACE VIEW {schema}.trip_months AS " + " UNION ALL ".join(parts) + ";"
-            )
-    finally:
-        conn.close()
+            conn.execute("CREATE OR REPLACE VIEW trip_months AS " + " UNION ALL ".join(parts) + ";")

@@ -1,9 +1,4 @@
-"""Tests for the schema-aware MotherDuck loader.
-
-MotherDuck is replaced by a local DuckDB file attached under the same ``md``
-alias, so the SQL path (schema discovery, transaction, audit table) is exercised
-without touching the cloud.
-"""
+"""Tests for the schema-aware warehouse loader (local DuckDB file)."""
 
 from __future__ import annotations
 
@@ -12,19 +7,9 @@ from pathlib import Path
 import duckdb
 import pytest
 
-from flows import observability, warehouse
-from flows.config import Settings
-
-SETTINGS = Settings(
-    b2_endpoint="",
-    b2_region="",
-    b2_key_id="",
-    b2_app_key="",
-    b2_bucket="",
-    motherduck_database="nyc_taxi",
-    motherduck_token="",
-    motherduck_schema="zoomcamp",
-)
+from nyc_taxi_elt.config import Settings
+from nyc_taxi_elt.warehouse import loader, views
+from nyc_taxi_elt.warehouse.connection import connect_warehouse
 
 TRIPS = [
     ("1", "2019-01-02 08:00:00", "2019-01-02 08:10:00", "100", "200", 12.5),
@@ -52,18 +37,6 @@ YELLOW_COLUMNS = [
     "total_amount DOUBLE",
     "congestion_surcharge DOUBLE",
 ]
-
-
-@pytest.fixture()
-def local_md(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    db_path = tmp_path / "motherduck.duckdb"
-
-    def attach(conn: duckdb.DuckDBPyConnection, settings: Settings) -> None:
-        conn.execute(f"ATTACH '{db_path.as_posix()}' AS md;")
-
-    monkeypatch.setattr(warehouse, "attach_motherduck", attach)
-    monkeypatch.setattr(observability, "attach_motherduck", attach)
-    return db_path
 
 
 def write_yellow(
@@ -101,12 +74,13 @@ def write_yellow(
 
 
 def load(
+    settings: Settings,
     parquet_path: Path,
     *,
     filename: str = "yellow_tripdata_2019-01.parquet",
     trip_month: str = "2019-01",
-) -> warehouse.LoadResult:
-    return warehouse.load_parquet(
+) -> loader.LoadResult:
+    return loader.load_parquet(
         parquet_path,
         filename=filename,
         taxi_type="yellow",
@@ -114,109 +88,89 @@ def load(
         source_uri=f"https://example.test/{filename}",
         size_bytes=parquet_path.stat().st_size,
         sha256="deadbeef",
-        settings=SETTINGS,
+        settings=settings,
         flow_run_id="run-1",
         flow_run_name="test-run",
     )
 
 
-def table_rows(db_path: Path, filename: str) -> int:
-    conn = duckdb.connect(str(db_path))
-    try:
+def table_rows(settings: Settings, filename: str) -> int:
+    with connect_warehouse(settings) as conn:
         return conn.execute(
-            "SELECT COUNT(*) FROM zoomcamp.yellow_tripdata WHERE filename = ?",
+            "SELECT COUNT(*) FROM yellow_tripdata WHERE filename = ?",
             [filename],
         ).fetchone()[0]
-    finally:
-        conn.close()
 
 
-def test_reload_is_idempotent_and_audited(tmp_path: Path, local_md: Path) -> None:
+def test_reload_is_idempotent_and_audited(tmp_path: Path, settings: Settings) -> None:
     parquet = write_yellow(tmp_path / "jan.parquet")
 
-    first = load(parquet)
-    second = load(parquet)
+    first = load(settings, parquet)
+    second = load(settings, parquet)
 
     assert first["rows_in_file"] == 3
     assert first["rows_before"] == 0
     assert first["rows_after"] == 3
     assert second["rows_before"] == 3
     assert second["rows_after"] == 3
-    assert table_rows(local_md, "yellow_tripdata_2019-01.parquet") == 3
+    assert table_rows(settings, "yellow_tripdata_2019-01.parquet") == 3
 
-    conn = duckdb.connect(str(local_md))
-    try:
-        audited = conn.execute("SELECT COUNT(*) FROM zoomcamp.pipeline_runs").fetchone()[0]
-        sha = conn.execute("SELECT DISTINCT sha256 FROM zoomcamp.pipeline_runs").fetchone()[0]
-    finally:
-        conn.close()
+    with connect_warehouse(settings) as conn:
+        audited = conn.execute("SELECT COUNT(*) FROM pipeline_runs").fetchone()[0]
+        sha = conn.execute("SELECT DISTINCT sha256 FROM pipeline_runs").fetchone()[0]
     assert audited == 2
     assert sha == "deadbeef"
 
 
-def test_new_source_column_is_added(tmp_path: Path, local_md: Path) -> None:
+def test_new_source_column_is_added(tmp_path: Path, settings: Settings) -> None:
     base = write_yellow(tmp_path / "base.parquet")
-    load(base)
+    load(settings, base)
 
     extended = write_yellow(
         tmp_path / "extended.parquet",
         extra={"cbd_congestion_fee": "DOUBLE"},
     )
-    result = load(extended)
+    result = load(settings, extended)
 
     assert result["new_columns"] == ["cbd_congestion_fee"]
 
-    conn = duckdb.connect(str(local_md))
-    try:
-        fees = conn.execute(
-            "SELECT SUM(cbd_congestion_fee) FROM zoomcamp.yellow_tripdata"
-        ).fetchone()[0]
+    with connect_warehouse(settings) as conn:
+        fees = conn.execute("SELECT SUM(cbd_congestion_fee) FROM yellow_tripdata").fetchone()[0]
         nulls = conn.execute(
-            """
-            SELECT COUNT(*) FROM zoomcamp.yellow_tripdata
-            WHERE cbd_congestion_fee IS NULL
-            """
+            "SELECT COUNT(*) FROM yellow_tripdata WHERE cbd_congestion_fee IS NULL"
         ).fetchone()[0]
-    finally:
-        conn.close()
     assert fees == pytest.approx(3 * 1.75)
     assert nulls == 0
 
 
-def test_missing_known_column_is_stored_as_null(tmp_path: Path, local_md: Path) -> None:
+def test_missing_known_column_is_stored_as_null(tmp_path: Path, settings: Settings) -> None:
     parquet = write_yellow(
         tmp_path / "no_surcharge.parquet",
         omit={"congestion_surcharge"},
     )
-    result = load(parquet)
+    result = load(settings, parquet)
 
     assert "congestion_surcharge" in result["missing_columns"]
 
-    conn = duckdb.connect(str(local_md))
-    try:
+    with connect_warehouse(settings) as conn:
         nulls = conn.execute(
-            """
-            SELECT COUNT(*) FROM zoomcamp.yellow_tripdata
-            WHERE congestion_surcharge IS NULL
-            """
+            "SELECT COUNT(*) FROM yellow_tripdata WHERE congestion_surcharge IS NULL"
         ).fetchone()[0]
-    finally:
-        conn.close()
     assert nulls == 3
 
 
-def test_missing_required_column_fails(tmp_path: Path, local_md: Path) -> None:
+def test_missing_required_column_fails(tmp_path: Path, settings: Settings) -> None:
     parquet = write_yellow(tmp_path / "no_vendor.parquet", omit={"VendorID"})
 
     with pytest.raises(ValueError, match="kolom wajib"):
-        load(parquet)
+        load(settings, parquet)
 
-    assert table_rows(local_md, "yellow_tripdata_2019-01.parquet") == 0
+    assert table_rows(settings, "yellow_tripdata_2019-01.parquet") == 0
 
 
-def test_failed_validation_rolls_back(tmp_path: Path, local_md: Path) -> None:
+def test_failed_validation_rolls_back(tmp_path: Path, settings: Settings) -> None:
     good = write_yellow(tmp_path / "good.parquet")
-    load(good)
+    load(settings, good)
 
     bad = write_yellow(
         tmp_path / "bad_month.parquet",
@@ -230,13 +184,13 @@ def test_failed_validation_rolls_back(tmp_path: Path, local_md: Path) -> None:
     )
 
     with pytest.raises(ValueError, match="di luar 2019-01"):
-        load(bad)
+        load(settings, bad)
 
-    # The previous rows for this filename must survive the failed reload.
-    assert table_rows(local_md, "yellow_tripdata_2019-01.parquet") == 3
+    # Previous rows for this filename must survive the failed reload.
+    assert table_rows(settings, "yellow_tripdata_2019-01.parquet") == 3
 
 
-def test_out_of_month_within_threshold_only_warns(tmp_path: Path, local_md: Path) -> None:
+def test_out_of_month_within_threshold_only_warns(tmp_path: Path, settings: Settings) -> None:
     many = [
         (
             "1",
@@ -252,66 +206,59 @@ def test_out_of_month_within_threshold_only_warns(tmp_path: Path, local_md: Path
         tmp_path / "one_late.parquet",
         trips=many + [("1", "2018-12-31 23:00:00", "2018-12-31 23:10:00", "900", "901", 5.0)],
     )
-    result = load(parquet)
+    result = load(settings, parquet)
 
     assert result["rows_in_file"] == 200
     assert any("di luar 2019-01" in warning for warning in result["warnings"])
 
 
-def test_observability_views(tmp_path: Path, local_md: Path) -> None:
+def test_monitoring_views(tmp_path: Path, settings: Settings) -> None:
     parquet = write_yellow(tmp_path / "obs.parquet")
-    load(parquet)
+    load(settings, parquet)
 
-    observability.refresh_observability_views(SETTINGS)
+    views.refresh_monitoring_views(settings)
 
-    conn = duckdb.connect(str(local_md))
-    try:
+    with connect_warehouse(settings) as conn:
         health = conn.execute(
             """
             SELECT taxi_type, trip_month, rows_loaded, rows_in_table, load_count,
                    months_behind
-            FROM zoomcamp.pipeline_health
+            FROM pipeline_health
             """
         ).fetchall()
         months = conn.execute(
-            "SELECT taxi_type, filename, rows, suspicious_rows FROM zoomcamp.trip_months"
+            "SELECT taxi_type, filename, rows, suspicious_rows FROM trip_months"
         ).fetchall()
-    finally:
-        conn.close()
 
     assert health[0][:5] == ("yellow", "2019-01", 3, 3, 1)
     assert health[0][5] >= 50
     assert months == [("yellow", "yellow_tripdata_2019-01.parquet", 3, 0)]
 
 
-def test_loaded_files_reads_the_audit_table(tmp_path: Path, local_md: Path) -> None:
-    # No audit table yet (fresh warehouse).
-    assert warehouse.loaded_files(SETTINGS, ["2019-01"]) == {}
+def test_loaded_files_reads_the_audit_table(tmp_path: Path, settings: Settings) -> None:
+    assert loader.loaded_files(settings, ["2019-01"]) == {}
 
     parquet = write_yellow(tmp_path / "audit.parquet")
-    load(parquet)
+    load(settings, parquet)
 
-    assert warehouse.loaded_files(SETTINGS, ["2019-01"]) == {
+    assert loader.loaded_files(settings, ["2019-01"]) == {
         "2019-01": {"yellow_tripdata_2019-01.parquet"}
     }
-    assert warehouse.loaded_files(SETTINGS, ["2026-09"]) == {}
-    assert warehouse.loaded_files(SETTINGS, []) == {}
+    assert loader.loaded_files(settings, ["2026-09"]) == {}
+    assert loader.loaded_files(settings, []) == {}
 
 
-def test_impossible_timestamp_only_warns(tmp_path: Path, local_md: Path) -> None:
+def test_impossible_timestamp_only_warns(tmp_path: Path, settings: Settings) -> None:
     parquet = write_yellow(
         tmp_path / "future.parquet",
         trips=TRIPS + [("1", "2019-01-05 08:00:00", "2088-01-24 07:28:25", "500", "501", 9.0)],
     )
-    result = load(parquet)
+    result = load(settings, parquet)
 
     assert result["rows_in_file"] == 4
     assert any("timestamp jauh di luar" in warning for warning in result["warnings"])
 
-    observability.refresh_observability_views(SETTINGS)
-    conn = duckdb.connect(str(local_md))
-    try:
-        suspicious = conn.execute("SELECT suspicious_rows FROM zoomcamp.trip_months").fetchone()[0]
-    finally:
-        conn.close()
+    views.refresh_monitoring_views(settings)
+    with connect_warehouse(settings) as conn:
+        suspicious = conn.execute("SELECT suspicious_rows FROM trip_months").fetchone()[0]
     assert suspicious == 1

@@ -28,11 +28,11 @@ jobs:
 
       - name: Install Python and dependencies
         run: |
-          uv python install 3.14
+          uv python install
           uv sync --locked
 
       - name: Import check
-        run: uv run python -c "import flows.nyc_taxi, flows.smoke"
+        run: uv run python -c "import nyc_taxi_elt.flows.ingest, nyc_taxi_elt.flows.smoke"
 
       - name: Ruff lint
         run: uv run ruff check . --output-format=github

@@ -1,24 +1,24 @@
-# Deployment configuration for the NYC Taxi ELT pipeline.
-# Managed by Prefect Cloud (prefect:managed work pool).
-name: nyc-taxi
-prefect-version: 3.9.0
+# Prefect deployments for nyc-taxi-elt (prod).
+# Runs on a Prefect Managed work pool, so there is no worker to maintain.
+name: nyc-taxi-elt
+prefect-version: ">=3.9.0"
 
 build: null
 push: null
 
 pull:
   - prefect.deployments.steps.git_clone:
-      repository: https://github.com/patuh-istizhar/nyc-taxi-prefect.git
+      repository: https://github.com/patuh-istizhar/nyc-taxi-elt.git
       branch: main
 
 deployments:
-  - name: nyc-taxi-weekly
-    description: "Weekly NYC TLC ELT: loads every incomplete month it can, skips finished ones."
-    entrypoint: flows/nyc_taxi.py:nyc_taxi
-    tags: ["nyc-taxi", "managed"]
+  - name: weekly
+    description: "Weekly NYC TLC ELT (prod): loads every incomplete month, skips finished ones."
+    entrypoint: nyc_taxi_elt/flows/ingest.py:ingest
+    tags: ["nyc-taxi", "prod"]
     parameters:
       taxi_type: all
-      force_download: false
+      force: false
     concurrency_limit: 1
     schedules:
       # Weekly: TLC publish dates slip, so a retry cadence works better than one
@@ -28,25 +28,28 @@ deployments:
         active: true
     work_pool:
       name: nyc-taxi-managed
-      # Both deployments run the same code, so the smoke deployment reuses this
-      # exact runtime block through the YAML anchor.
-      job_variables: &job_variables
+      # The smoke deployment reuses this exact runtime through the YAML anchor.
+      job_variables: &prod_job
+        # Keep in sync with pyproject.toml; duckdb must match a MotherDuck-supported version.
         pip_packages:
           - duckdb==1.5.6
           - boto3>=1.43.118
           - requests>=2.34.2
         env:
-          B2_ENDPOINT: https://s3.us-east-005.backblazeb2.com
-          B2_REGION: us-east-005
-          B2_BUCKET: zoomcamp
-          MOTHERDUCK_DATABASE: nyc_taxi
-          MOTHERDUCK_SCHEMA: zoomcamp
-          NYC_TLC_SOURCE_BASE: https://d37ci6vzurychx.cloudfront.net/trip-data
+          ENV: prod
+          S3_ENDPOINT_URL: https://s3.us-east-005.backblazeb2.com
+          S3_REGION: us-east-005
+          S3_BUCKET: zoomcamp
+          WAREHOUSE_DATABASE: md:nyc_taxi
+          # Existing prod data lives in this schema.
+          WAREHOUSE_SCHEMA: zoomcamp
+          # Keys come from Prefect Secret blocks:
+          # s3-access-key-id, s3-secret-access-key, motherduck-token.
 
-  - name: nyc-taxi-smoke
-    description: "Connectivity check for B2 and MotherDuck."
-    entrypoint: flows/smoke.py:smoke
-    tags: ["nyc-taxi", "managed"]
+  - name: smoke
+    description: "Connectivity check for S3 and the warehouse (prod)."
+    entrypoint: nyc_taxi_elt/flows/smoke.py:smoke
+    tags: ["nyc-taxi", "prod"]
     work_pool:
       name: nyc-taxi-managed
-      job_variables: *job_variables
+      job_variables: *prod_job

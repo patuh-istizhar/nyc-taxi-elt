@@ -1,4 +1,4 @@
-"""Backblaze B2 helpers built on the S3-compatible API."""
+"""Helpers for any S3-compatible store (AWS S3, RustFS, MinIO, Backblaze B2, R2, ...)."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ import requests
 from botocore.config import Config
 from botocore.exceptions import ClientError
 
-from flows.config import Settings
+from nyc_taxi_elt.config import Settings
 
 logger = logging.getLogger(__name__)
 
@@ -22,12 +22,13 @@ PARQUET_MAGIC = b"PAR1"
 
 
 def build_client(settings: Settings):
+    """Build a boto3 S3 client pointed at the configured endpoint."""
     return boto3.client(
         "s3",
-        endpoint_url=settings.b2_endpoint,
-        region_name=settings.b2_region,
-        aws_access_key_id=settings.b2_key_id,
-        aws_secret_access_key=settings.b2_app_key,
+        endpoint_url=settings.s3_endpoint_url,
+        region_name=settings.s3_region,
+        aws_access_key_id=settings.s3_access_key_id,
+        aws_secret_access_key=settings.s3_secret_access_key,
         config=Config(
             connect_timeout=10,
             read_timeout=300,
@@ -49,9 +50,19 @@ def bucket_exists(client, bucket: str) -> bool:
         if code in {"404", "NoSuchBucket", "NotFound"} or status == 404:
             return False
         if code in {"403", "AccessDenied"} or status == 403:
-            # Bucket-scoped B2 keys may lack ListBuckets while read/write works.
+            # Bucket-scoped keys may lack ListBuckets while read/write works.
             return True
         raise
+
+
+def ensure_bucket(client, bucket: str, *, create: bool) -> None:
+    """Fail clearly when the bucket is missing, or create it when allowed (dev)."""
+    if bucket_exists(client, bucket):
+        return
+    if not create:
+        raise ValueError(f"Bucket {bucket!r} tidak ditemukan. Buat bucket-nya terlebih dahulu.")
+    logger.info("Membuat bucket s3://%s", bucket)
+    client.create_bucket(Bucket=bucket)
 
 
 def object_size(client, bucket: str, key: str) -> int | None:
@@ -89,8 +100,8 @@ def upload_from_http(
     *,
     metadata: dict[str, str] | None = None,
 ) -> tuple[int, str]:
-    """Stream an HTTP response into B2 and return (size_bytes, sha256_hex)."""
-    logger.info("Streaming %s to b2://%s/%s", source_uri, bucket, key)
+    """Stream an HTTP response into S3 and return (size_bytes, sha256_hex)."""
+    logger.info("Streaming %s to s3://%s/%s", source_uri, bucket, key)
 
     with requests.get(source_uri, stream=True, timeout=(10, 300)) as response:
         try:
@@ -158,7 +169,7 @@ def upload_from_http(
                 client.abort_multipart_upload(Bucket=bucket, Key=key, UploadId=upload_id)
             except Exception:
                 logger.warning(
-                    "Gagal abort multipart upload %s untuk b2://%s/%s",
+                    "Gagal abort multipart upload %s untuk s3://%s/%s",
                     upload_id,
                     bucket,
                     key,
@@ -167,11 +178,11 @@ def upload_from_http(
             raise
 
     def _discard(reason: str) -> None:
-        logger.error("%s; menghapus b2://%s/%s", reason, bucket, key)
+        logger.error("%s; menghapus s3://%s/%s", reason, bucket, key)
         try:
             client.delete_object(Bucket=bucket, Key=key)
         except Exception:
-            logger.warning("Gagal menghapus objek rusak b2://%s/%s", bucket, key, exc_info=True)
+            logger.warning("Gagal menghapus objek rusak s3://%s/%s", bucket, key, exc_info=True)
 
     if expected_bytes is not None and total_bytes != expected_bytes:
         _discard(f"Ukuran unduhan tidak cocok: {total_bytes} != Content-Length {expected_bytes}")
@@ -182,9 +193,9 @@ def upload_from_http(
 
     head = client.head_object(Bucket=bucket, Key=key)
     if head["ContentLength"] != total_bytes:
-        _discard(f"Ukuran objek B2 tidak cocok: {head['ContentLength']} != {total_bytes}")
+        _discard(f"Ukuran objek tidak cocok: {head['ContentLength']} != {total_bytes}")
         raise ValueError(
-            f"Ukuran objek b2://{bucket}/{key} tidak cocok: "
+            f"Ukuran objek s3://{bucket}/{key} tidak cocok: "
             f"{head['ContentLength']} != {total_bytes} byte."
         )
 

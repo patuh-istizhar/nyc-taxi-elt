@@ -1,11 +1,12 @@
 [project]
-name = "prefect-project"
-version = "0.1.0"
-description = "NYC TLC taxi data ELT orchestrated by Prefect."
+name = "nyc-taxi-elt"
+version = "0.3.0"
+description = "NYC TLC trip data ELT: HTTP -> S3-compatible storage -> DuckDB warehouse, orchestrated by Prefect."
 readme = "README.md"
-requires-python = ">=3.14"
+requires-python = ">=3.12"
 dependencies = [
     "boto3>=1.43.118",
+    # Pinned: MotherDuck only supports specific DuckDB releases. Keep prefect.yaml in sync.
     "duckdb==1.5.6",
     "prefect>=3.9.0",
     "requests>=2.34.2",
@@ -16,6 +17,7 @@ package = false
 
 [dependency-groups]
 dev = [
+    "moto>=5.1.0",
     "pytest>=9.1.1",
     "ruff>=0.17.2",
 ]
@@ -26,10 +28,10 @@ pythonpath = ["."]
 
 [tool.ruff]
 line-length = 100
-target-version = "py314"
+target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["flows"]
+known-first-party = ["nyc_taxi_elt"]

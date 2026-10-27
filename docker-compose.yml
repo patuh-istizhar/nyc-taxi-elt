@@ -1,0 +1,27 @@
+# Local S3-compatible object storage for development (RustFS).
+#
+#   docker compose up -d --wait
+#
+# The flow creates the bucket automatically when ENV=dev.
+# Console: http://127.0.0.1:9001 (rustfsadmin / rustfsadmin)
+services:
+  rustfs:
+    image: rustfs/rustfs:1.0.4
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      RUSTFS_ACCESS_KEY: rustfsadmin
+      RUSTFS_SECRET_KEY: rustfsadmin
+      RUSTFS_CONSOLE_ENABLE: "true"
+    volumes:
+      - rustfs-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9000/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
+volumes:
+  rustfs-data:

@@ -1,4 +1,4 @@
-"""MotherDuck loading for the NYC Taxi flows.
+"""Load NYC TLC parquet files into the warehouse.
 
 The loader is schema aware: columns that appear in the source parquet but not in
 ``TRIP_TABLES`` are added to the table automatically, and known columns that are
@@ -9,25 +9,27 @@ month half deleted. Every successful load is recorded in ``pipeline_runs``.
 
 from __future__ import annotations
 
-from datetime import UTC, date, datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TypedDict
 
 import duckdb
 
-from flows.config import Settings
+from nyc_taxi_elt.config import Settings
+from nyc_taxi_elt.months import add_months, month_bounds
+from nyc_taxi_elt.tlc import REQUIRED_COLUMNS, TRIP_TABLES, TableSpec, table_name
+from nyc_taxi_elt.warehouse.connection import (
+    connect_warehouse,
+    sql_ident,
+    sql_literal,
+    table_exists,
+)
 
 # Files sometimes contain a few trips from the adjacent month; only treat the
 # file as corrupt when the share is large.
 MAX_OUT_OF_MONTH_RATIO = 0.01
 
 INTERNAL_COLUMNS = {"unique_row_id", "filename"}
-
-
-class TableConfig(TypedDict):
-    pickup_column: str
-    dropoff_column: str
-    columns: list[tuple[str, str]]
 
 
 class LoadResult(TypedDict):
@@ -45,60 +47,6 @@ class LoadResult(TypedDict):
     warnings: list[str]
     loaded_at: str
 
-
-TRIP_TABLES: dict[str, TableConfig] = {
-    "yellow": {
-        "pickup_column": "tpep_pickup_datetime",
-        "dropoff_column": "tpep_dropoff_datetime",
-        "columns": [
-            ("VendorID", "VARCHAR"),
-            ("tpep_pickup_datetime", "TIMESTAMP"),
-            ("tpep_dropoff_datetime", "TIMESTAMP"),
-            ("passenger_count", "BIGINT"),
-            ("trip_distance", "DOUBLE"),
-            ("RatecodeID", "VARCHAR"),
-            ("store_and_fwd_flag", "VARCHAR"),
-            ("PULocationID", "VARCHAR"),
-            ("DOLocationID", "VARCHAR"),
-            ("payment_type", "BIGINT"),
-            ("fare_amount", "DOUBLE"),
-            ("extra", "DOUBLE"),
-            ("mta_tax", "DOUBLE"),
-            ("tip_amount", "DOUBLE"),
-            ("tolls_amount", "DOUBLE"),
-            ("improvement_surcharge", "DOUBLE"),
-            ("total_amount", "DOUBLE"),
-            ("congestion_surcharge", "DOUBLE"),
-            ("airport_fee", "DOUBLE"),
-        ],
-    },
-    "green": {
-        "pickup_column": "lpep_pickup_datetime",
-        "dropoff_column": "lpep_dropoff_datetime",
-        "columns": [
-            ("VendorID", "VARCHAR"),
-            ("lpep_pickup_datetime", "TIMESTAMP"),
-            ("lpep_dropoff_datetime", "TIMESTAMP"),
-            ("store_and_fwd_flag", "VARCHAR"),
-            ("RatecodeID", "VARCHAR"),
-            ("PULocationID", "VARCHAR"),
-            ("DOLocationID", "VARCHAR"),
-            ("passenger_count", "BIGINT"),
-            ("trip_distance", "DOUBLE"),
-            ("fare_amount", "DOUBLE"),
-            ("extra", "DOUBLE"),
-            ("mta_tax", "DOUBLE"),
-            ("tip_amount", "DOUBLE"),
-            ("tolls_amount", "DOUBLE"),
-            ("ehail_fee", "DOUBLE"),
-            ("improvement_surcharge", "DOUBLE"),
-            ("total_amount", "DOUBLE"),
-            ("payment_type", "BIGINT"),
-            ("trip_type", "BIGINT"),
-            ("congestion_surcharge", "DOUBLE"),
-        ],
-    },
-}
 
 AUDIT_DDL = """
 CREATE TABLE IF NOT EXISTS {table} (
@@ -120,73 +68,25 @@ CREATE TABLE IF NOT EXISTS {table} (
 """
 
 
-def _sql_literal(value: str) -> str:
-    return "'" + value.replace("'", "''") + "'"
-
-
-def _sql_ident(name: str) -> str:
-    return '"' + name.replace('"', '""') + '"'
-
-
-def _motherduck_uri(settings: Settings) -> str:
-    return f"md:{settings.motherduck_database}"
-
-
-def attach_motherduck(conn: duckdb.DuckDBPyConnection, settings: Settings) -> None:
-    conn.execute("INSTALL motherduck;")
-    conn.execute("LOAD motherduck;")
-    conn.execute(f"SET motherduck_token = {_sql_literal(settings.motherduck_token)};")
-    conn.execute(f"ATTACH {_sql_literal(_motherduck_uri(settings))} AS md;")
-
-
-def _shift_month(month: date, offset: int) -> date:
-    index = month.year * 12 + month.month - 1 + offset
-    return date(index // 12, index % 12 + 1, 1)
-
-
-def month_bounds(trip_month: str) -> tuple[date, date]:
-    year_text, month_text = trip_month.split("-")
-    year, month = int(year_text), int(month_text)
-    start = date(year, month, 1)
-    end = date(year + 1, 1, 1) if month == 12 else date(year, month + 1, 1)
-    return start, end
-
-
-def _table_exists(conn: duckdb.DuckDBPyConnection, schema: str, table: str) -> bool:
-    row = conn.execute(
-        """
-        SELECT 1
-        FROM duckdb_tables()
-        WHERE database_name = 'md' AND schema_name = ? AND table_name = ?
-        """,
-        [schema, table],
-    ).fetchone()
-    return row is not None
-
-
 def loaded_files(settings: Settings, trip_months: list[str]) -> dict[str, set[str]]:
     """Filenames with a successful load per month, according to the audit table."""
     if not trip_months:
         return {}
 
-    schema = settings.motherduck_schema
-    conn = duckdb.connect()
-    try:
-        attach_motherduck(conn, settings)
-        if not _table_exists(conn, schema, "pipeline_runs"):
+    schema = settings.warehouse_schema
+    with connect_warehouse(settings) as conn:
+        if not table_exists(conn, schema, "pipeline_runs"):
             return {}
         placeholders = ", ".join("?" for _ in trip_months)
         rows = conn.execute(
             f"""
             SELECT trip_month, filename
-            FROM md.{schema}.pipeline_runs
+            FROM pipeline_runs
             WHERE trip_month IN ({placeholders})
             GROUP BY trip_month, filename
             """,
             list(trip_months),
         ).fetchall()
-    finally:
-        conn.close()
 
     loaded: dict[str, set[str]] = {}
     for trip_month, filename in rows:
@@ -196,7 +96,7 @@ def loaded_files(settings: Settings, trip_months: list[str]) -> dict[str, set[st
 
 def _describe_parquet(conn: duckdb.DuckDBPyConnection, parquet_path: Path) -> list[tuple[str, str]]:
     rows = conn.execute(
-        f"DESCRIBE SELECT * FROM read_parquet({_sql_literal(str(parquet_path))});"
+        f"DESCRIBE SELECT * FROM read_parquet({sql_literal(str(parquet_path))});"
     ).fetchall()
     return [(str(row[0]), str(row[1])) for row in rows]
 
@@ -209,13 +109,13 @@ def _table_columns(conn: duckdb.DuckDBPyConnection, table: str) -> set[str]:
 def _ensure_table_columns(
     conn: duckdb.DuckDBPyConnection,
     table: str,
-    table_config: TableConfig,
+    table_config: TableSpec,
 ) -> None:
     existing = _table_columns(conn, table)
     for name, data_type in table_config["columns"]:
         if name.lower() not in existing:
             conn.execute(
-                f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {_sql_ident(name)} {data_type};"
+                f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {sql_ident(name)} {data_type};"
             )
 
 
@@ -224,17 +124,15 @@ def _validate_load(
     *,
     table: str,
     filename: str,
-    table_config: TableConfig,
+    table_config: TableSpec,
     trip_month: str,
     rows_in_file: int,
 ) -> list[str]:
-    pickup = _sql_ident(table_config["pickup_column"])
-    dropoff = _sql_ident(table_config["dropoff_column"])
+    pickup = sql_ident(table_config["pickup_column"])
+    dropoff = sql_ident(table_config["dropoff_column"])
     start, end = month_bounds(trip_month)
-    # A few rows legitimately sit next to the month boundary; anything further
-    # than one month out is treated as an impossible timestamp.
-    lower = _shift_month(start, -1)
-    upper = _shift_month(end, 1)
+    lower = add_months(start, -1)
+    upper = add_months(end, 1)
 
     (
         rows,
@@ -254,16 +152,16 @@ def _validate_load(
               COUNT(*) FILTER (WHERE {dropoff} IS NULL),
               COUNT(*) FILTER (WHERE {dropoff} < {pickup}),
               COUNT(*) FILTER (
-                WHERE {pickup} < TIMESTAMP {_sql_literal(str(start))}
-                   OR {pickup} >= TIMESTAMP {_sql_literal(str(end))}
+                WHERE {pickup} < TIMESTAMP {sql_literal(str(start))}
+                   OR {pickup} >= TIMESTAMP {sql_literal(str(end))}
               ),
               COUNT(*) FILTER (WHERE total_amount < 0),
               COUNT(*) FILTER (
-                WHERE {pickup} < TIMESTAMP {_sql_literal(str(lower))}
-                   OR {dropoff} >= TIMESTAMP {_sql_literal(str(upper))}
+                WHERE {pickup} < TIMESTAMP {sql_literal(str(lower))}
+                   OR {dropoff} >= TIMESTAMP {sql_literal(str(upper))}
               )
             FROM {table}
-            WHERE filename = {_sql_literal(filename)};
+            WHERE filename = {sql_literal(filename)};
             """
     ).fetchone()
 
@@ -351,24 +249,19 @@ def load_parquet(
     flow_run_id: str = "",
     flow_run_name: str = "",
 ) -> LoadResult:
-    """Load one parquet file into MotherDuck.
+    """Load one parquet file into the warehouse.
 
     Rows for ``filename`` are replaced inside a transaction, so re-running a
     month is idempotent and a failed insert leaves the previous rows intact.
     Source columns outside ``TRIP_TABLES`` are added to the table on the fly.
     """
     table_config = TRIP_TABLES[taxi_type]
-    schema = settings.motherduck_schema
-    table = f"md.{schema}.{taxi_type}_tripdata"
-    audit_table = f"md.{schema}.pipeline_runs"
+    table = table_name(taxi_type)
+    audit_table = "pipeline_runs"
 
-    conn = duckdb.connect()
-    try:
-        attach_motherduck(conn, settings)
-
-        conn.execute(f"CREATE SCHEMA IF NOT EXISTS md.{schema};")
+    with connect_warehouse(settings) as conn:
         columns_ddl = ",\n                    ".join(
-            f"{_sql_ident(name)} {data_type}" for name, data_type in table_config["columns"]
+            f"{sql_ident(name)} {data_type}" for name, data_type in table_config["columns"]
         )
         conn.execute(
             f"""
@@ -390,9 +283,7 @@ def load_parquet(
         known_by_lower = {name.lower(): data_type for name, data_type in table_config["columns"]}
 
         required = [
-            "VendorID",
-            "PULocationID",
-            "DOLocationID",
+            *REQUIRED_COLUMNS,
             table_config["pickup_column"],
             table_config["dropoff_column"],
         ]
@@ -415,7 +306,7 @@ def load_parquet(
             )
         for name, data_type in extra_columns:
             conn.execute(
-                f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {_sql_ident(name)} {data_type};"
+                f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {sql_ident(name)} {data_type};"
             )
 
         missing_columns = [
@@ -426,25 +317,25 @@ def load_parquet(
         for name, data_type in table_config["columns"]:
             source = source_by_lower.get(name.lower())
             if source is None:
-                select_exprs.append(f"CAST(NULL AS {data_type}) AS {_sql_ident(name)}")
+                select_exprs.append(f"CAST(NULL AS {data_type}) AS {sql_ident(name)}")
             else:
                 select_exprs.append(
-                    f"CAST({_sql_ident(source[0])} AS {data_type}) AS {_sql_ident(name)}"
+                    f"CAST({sql_ident(source[0])} AS {data_type}) AS {sql_ident(name)}"
                 )
         for name, data_type in extra_columns:
-            select_exprs.append(f"CAST({_sql_ident(name)} AS {data_type}) AS {_sql_ident(name)}")
+            select_exprs.append(f"CAST({sql_ident(name)} AS {data_type}) AS {sql_ident(name)}")
 
         payload_columns = (
             ["unique_row_id", "filename"]
             + [name for name, _ in table_config["columns"]]
             + [name for name, _ in extra_columns]
         )
-        column_sql = ", ".join(_sql_ident(name) for name in payload_columns)
+        column_sql = ", ".join(sql_ident(name) for name in payload_columns)
 
         conn.execute(
             f"""
             CREATE OR REPLACE TEMP TABLE ext AS
-            SELECT * FROM read_parquet({_sql_literal(str(parquet_path))});
+            SELECT * FROM read_parquet({sql_literal(str(parquet_path))});
             """
         )
         conn.execute(
@@ -453,12 +344,12 @@ def load_parquet(
             SELECT
               MD5(CONCAT(
                 COALESCE(CAST(VendorID AS VARCHAR), ''),
-                COALESCE(CAST({_sql_ident(table_config["pickup_column"])} AS VARCHAR), ''),
-                COALESCE(CAST({_sql_ident(table_config["dropoff_column"])} AS VARCHAR), ''),
+                COALESCE(CAST({sql_ident(table_config["pickup_column"])} AS VARCHAR), ''),
+                COALESCE(CAST({sql_ident(table_config["dropoff_column"])} AS VARCHAR), ''),
                 COALESCE(CAST(PULocationID AS VARCHAR), ''),
                 COALESCE(CAST(DOLocationID AS VARCHAR), '')
               )) AS unique_row_id,
-              {_sql_literal(filename)} AS filename,
+              {sql_literal(filename)} AS filename,
               {", ".join(select_exprs)}
             FROM ext
             QUALIFY ROW_NUMBER() OVER (PARTITION BY unique_row_id) = 1;
@@ -474,7 +365,7 @@ def load_parquet(
 
         conn.execute("BEGIN TRANSACTION;")
         try:
-            conn.execute(f"DELETE FROM {table} WHERE filename = {_sql_literal(filename)};")
+            conn.execute(f"DELETE FROM {table} WHERE filename = {sql_literal(filename)};")
             conn.execute(f"INSERT INTO {table} ({column_sql}) SELECT {column_sql} FROM dedup;")
             rows_after = int(conn.execute(f"SELECT COUNT(*) FROM {table};").fetchone()[0])
             warnings = _validate_load(
@@ -512,7 +403,5 @@ def load_parquet(
         except BaseException:
             conn.execute("ROLLBACK;")
             raise
-    finally:
-        conn.close()
 
     return result
