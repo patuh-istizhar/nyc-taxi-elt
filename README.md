@@ -119,7 +119,7 @@ One-time setup (Prefect Cloud):
 
 ```bash
 uv run prefect cloud login
-uv run prefect work-pool create nyc-taxi-managed --type prefect:managed
+uv run prefect work-pool create managed-pool --type prefect:managed
 # Secret blocks read by the flows
 uv run python -c "
 from prefect.blocks.system import Secret

@@ -27,7 +27,7 @@ deployments:
         timezone: UTC
         active: true
     work_pool:
-      name: nyc-taxi-managed
+      name: managed-pool
       # The smoke deployment reuses this exact runtime through the YAML anchor.
       job_variables: &prod_job
         # Keep in sync with pyproject.toml; duckdb must match a MotherDuck-supported version.
@@ -51,5 +51,5 @@ deployments:
     entrypoint: nyc_taxi_elt/flows/smoke.py:smoke
     tags: ["nyc-taxi", "prod"]
     work_pool:
-      name: nyc-taxi-managed
+      name: managed-pool
       job_variables: *prod_job
