@@ -13,7 +13,7 @@ pull:
 
 deployments:
   - name: weekly
-    description: "Weekly NYC TLC ELT (prod): loads every incomplete month, skips finished ones."
+    description: "Weekly NYC taxi ELT (prod): loads the last 3 finished months, skips loaded files."
     entrypoint: nyc_taxi_elt/flows/ingest.py:ingest
     tags: ["nyc-taxi", "prod"]
     parameters:
@@ -21,8 +21,7 @@ deployments:
       force: false
     concurrency_limit: 1
     schedules:
-      # Weekly: TLC publish dates slip, so a retry cadence works better than one
-      # fixed day. Already-loaded months make the run exit immediately.
+      # Weekly, because TLC publishes on no fixed day. Loaded files are skipped.
       - cron: "0 6 * * 1"
         timezone: UTC
         active: true

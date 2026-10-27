@@ -2,177 +2,101 @@
 
 [![CI](https://github.com/patuh-istizhar/nyc-taxi-elt/actions/workflows/ci.yml/badge.svg)](https://github.com/patuh-istizhar/nyc-taxi-elt/actions/workflows/ci.yml)
 
-NYC TLC trip data is streamed to **S3-compatible storage** as raw parquet, then
-loaded into a **DuckDB warehouse**, orchestrated by **Prefect**.
+A small ELT pipeline for learning. Prefect downloads NYC taxi trip files (parquet),
+stores them in **S3-compatible storage**, and loads them into a **DuckDB warehouse**.
 
-| Environment | S3 storage | Warehouse | Orchestration |
-|-------------|------------|-----------|---------------|
-| **dev**     | [RustFS](https://github.com/rustfs/rustfs) via docker compose | Local DuckDB file | Prefect (local) |
-| **prod**    | Any S3 API (Backblaze B2, Cloudflare R2, AWS S3) | MotherDuck (`md:`) | Prefect Managed |
-
-```mermaid
-flowchart LR
-    TLC[NYC TLC] -->|HTTP| S3[S3 storage]
-    S3 --> WH[Warehouse: DuckDB]
+```
+NYC TLC website  --HTTP-->  S3 bucket (raw parquet)  -->  warehouse (DuckDB tables)
 ```
 
-## Layout
+| | S3 storage | Warehouse | Prefect |
+|---|---|---|---|
+| **dev**  | RustFS (docker compose) | local file `./data/nyc_taxi.duckdb` | runs on your machine |
+| **prod** | Backblaze B2 | MotherDuck `md:nyc_taxi` | Prefect Cloud, Managed work pool |
+
+## Files
 
 ```
 nyc_taxi_elt/
-  config.py            settings from env vars / Prefect Secret blocks
-  months.py            month arithmetic + parsing (YYYY-MM)
-  tlc.py               NYC TLC source: taxi types, file names, table layouts
-  s3.py                S3 helpers: client, bucket, HTTP -> S3 streaming upload
-  warehouse/
-    connection.py      open DuckDB / MotherDuck, SQL quoting
-    loader.py          schema-aware, idempotent parquet load + audit
-    views.py           pipeline_health / trip_months views
-  flows/
-    ingest.py          Prefect flow `nyc-taxi-ingest` + CLI
-    smoke.py           Prefect flow `nyc-taxi-smoke`
+  config.py          read settings from env vars (or Prefect Secret blocks)
+  s3.py              upload a file from a URL to S3, download it again
+  warehouse.py       connect to DuckDB, load a parquet file, audit table
+  flows/ingest.py    the Prefect flow + command line
+  flows/smoke.py     quick check that S3 and the warehouse are reachable
+tests/               a few tests (fake S3 with moto, temporary DuckDB file)
+prefect.yaml         the prod deployment
+docker-compose.yml   RustFS for dev
 ```
 
-## How it works
+## What the flow does
 
-- Without a month, a run loads every incomplete month in the last six months,
-  newest first, so a month TLC published late is not stuck behind a newer one.
-- With `start_month` (and optionally `end_month`) it loads that month or every month
-  in the range (backfill), oldest first. Months already loaded are skipped; `force`
-  reloads them.
-- A source file that is not published yet (HTTP 403/404): scheduled runs stay green
-  while the month is within three months of the run date; explicit months load
-  everything that exists and then fail listing the missing files.
-- Reloading a file deletes its previous rows first, so runs are idempotent. A failed
-  load rolls back and keeps the old data.
-- Source columns outside the known schema are added automatically; known columns
-  missing from a file are stored as `NULL`; missing required columns fail the run.
-- Hard failures: row count mismatch, duplicate ids, null timestamps, more than 1% of
-  pickups outside the month.
-- Warnings only: out-of-month pickups, dropoff before pickup, negative totals, and
-  timestamps more than a month outside the file's month.
-- Every load writes to `pipeline_runs` and publishes a Prefect artifact
-  (`nyc-taxi-<YYYY-MM>`).
+For every month and taxi type (yellow, green):
 
+1. **Skip** the file if `pipeline_runs` says it is already loaded (unless `--force`).
+2. **Upload** `https://d37ci6vzurychx.cloudfront.net/trip-data/<file>` to the S3 bucket.
+   If TLC has not published the file yet, it is skipped with a warning.
+3. **Load** the file from S3 into `yellow_tripdata` / `green_tripdata`. Old rows of the
+   same file are deleted first, so loading twice never creates duplicates.
+4. **Record** the load in `pipeline_runs` (file, month, row count, time).
 
-## Warehouse objects
-
-| Object | Contents |
-|---|---|
-| `{schema}.yellow_tripdata` | yellow trips, one row per unique trip |
-| `{schema}.green_tripdata` | green trips |
-| `{schema}.pipeline_runs` | audit log of every load (rows, size, sha256, warnings) |
-| `{schema}.pipeline_health` | latest load per month/type, `days_since_load`, `months_behind` |
-| `{schema}.trip_months` | rows, pickup range and `suspicious_rows` per file |
-
-```sql
-SELECT trip_month, taxi_type, rows_in_table, months_behind, last_run
-FROM nyc_taxi.pipeline_health
-ORDER BY trip_month DESC;
-```
-
-Row id is `MD5(VendorID, pickup, dropoff, PULocationID, DOLocationID)`.
-
----
+Without a month, the flow checks the last 3 finished months. That is what the
+weekly schedule does.
 
 ## Dev
 
 ```bash
-docker compose up -d --wait      # RustFS on :9000 (console :9001, rustfsadmin/rustfsadmin)
-cp .env.example .env             # defaults: local RustFS + ./data/nyc_taxi.duckdb
+docker compose up -d --wait    # RustFS on :9000, console on :9001 (rustfsadmin / rustfsadmin)
+cp .env.example .env
 uv sync
 
 uv run --env-file .env python -m nyc_taxi_elt.flows.smoke
-
-# one month
 uv run --env-file .env python -m nyc_taxi_elt.flows.ingest --taxi-type green --month 2024-01
-
-# backfill a range (inclusive); taxi type defaults to all
-uv run --env-file .env python -m nyc_taxi_elt.flows.ingest --from 2023-01 --to 2023-12
-
-# reload even if already loaded
-uv run --env-file .env python -m nyc_taxi_elt.flows.ingest --month 2024-01 --force
-
-# what the schedule does: every incomplete month in the last six
-uv run --env-file .env python -m nyc_taxi_elt.flows.ingest
+uv run --env-file .env python -m nyc_taxi_elt.flows.ingest --from 2023-01 --to 2023-12   # backfill
+uv run --env-file .env python -m nyc_taxi_elt.flows.ingest --month 2024-01 --force       # load again
+uv run --env-file .env python -m nyc_taxi_elt.flows.ingest                               # last 3 months
 ```
 
-The bucket is created automatically in dev. Query the warehouse:
+Look at the data (the file and the schema are both called `nyc_taxi`, so write both):
 
 ```bash
-uv run python -c "import duckdb; print(duckdb.connect('data/nyc_taxi.duckdb').sql('SELECT * FROM nyc_taxi.pipeline_health'))"
+uv run python -c "import duckdb; con = duckdb.connect('data/nyc_taxi.duckdb'); print(con.sql('SELECT * FROM nyc_taxi.nyc_taxi.pipeline_runs'))"
 ```
-
-Runs go to an ephemeral local Prefect server. To watch them in a UI, run
-`uv run prefect server start` in another terminal and
-`uv run prefect config set PREFECT_API_URL=http://127.0.0.1:4200/api` first.
-
----
 
 ## Prod
 
-Prod config lives in [`prefect.yaml`](prefect.yaml) (`ENV=prod`, S3 endpoint, bucket,
-`WAREHOUSE_DATABASE=md:nyc_taxi`, `WAREHOUSE_SCHEMA=zoomcamp`) and runs on a
-Prefect Managed work pool that clones this repo.
-
-One-time setup (Prefect Cloud):
+Settings live in [`prefect.yaml`](prefect.yaml). Keys are stored in Prefect Secret
+blocks: `s3-access-key-id`, `s3-secret-access-key`, `motherduck-token`.
 
 ```bash
 uv run prefect cloud login
-uv run prefect work-pool create managed-pool --type prefect:managed
-# Secret blocks read by the flows
-uv run python -c "
-from prefect.blocks.system import Secret
-Secret(value='<s3 key id>').save('s3-access-key-id', overwrite=True)
-Secret(value='<s3 secret key>').save('s3-secret-access-key', overwrite=True)
-Secret(value='<motherduck token>').save('motherduck-token', overwrite=True)
-"
-```
-
-Deploy and run:
-
-```bash
-uv run prefect deploy --all                                   # after every push that changes flows
-uv run prefect deployment run nyc-taxi-ingest/weekly          # same as the schedule
+uv run prefect deploy --all                                  # after changing the flow
+uv run prefect deployment run nyc-taxi-ingest/weekly         # run now
 uv run prefect deployment run nyc-taxi-ingest/weekly \
-  --param start_month=2023-01 --param end_month=2023-12       # backfill
-uv run prefect deployment run nyc-taxi-ingest/weekly \
-  --param start_month=2024-01 --param force=true              # reload one month
+  --param start_month=2023-01 --param end_month=2023-12      # backfill
 ```
 
-Only the ingest flow is deployed. The smoke check runs from your machine against
-prod by putting the prod values in a `.env.prod` (ignored by git):
+Only the ingest flow is deployed. To check prod connections from your machine,
+put the prod values in `.env.prod` (ignored by git) and run
+`uv run --env-file .env.prod python -m nyc_taxi_elt.flows.smoke`.
 
-```bash
-uv run --env-file .env.prod python -m nyc_taxi_elt.flows.smoke
-uv run --env-file .env.prod python -m nyc_taxi_elt.flows.ingest --month 2024-01   # also works
-```
+## Settings
 
----
+| Variable | dev default | prod |
+|---|---|---|
+| `ENV` | `dev` | `prod` |
+| `S3_ENDPOINT_URL` | `http://127.0.0.1:9000` | B2 URL (empty = AWS S3) |
+| `S3_REGION` | `us-east-1` | required |
+| `S3_BUCKET` | `nyc-taxi` | required |
+| `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY` | from `.env` | Secret blocks |
+| `WAREHOUSE_DATABASE` | `./data/nyc_taxi.duckdb` | `md:nyc_taxi` |
+| `WAREHOUSE_SCHEMA` | `nyc_taxi` | `zoomcamp` |
+| `MOTHERDUCK_TOKEN` | not needed | Secret block (only for `md:`) |
 
-## Environment variables
+In dev the bucket is created for you. In prod a missing bucket is an error.
 
-| Variable | Dev default | Prod | Description |
-|---|---|---|---|
-| `ENV` | `dev` | `prod` | dev = defaults + auto-create bucket |
-| `S3_ENDPOINT_URL` | `http://127.0.0.1:9000` | provider URL | Empty = AWS S3 |
-| `S3_REGION` | `us-east-1` | *required* | |
-| `S3_ACCESS_KEY_ID` | — | env or block `s3-access-key-id` | |
-| `S3_SECRET_ACCESS_KEY` | — | env or block `s3-secret-access-key` | |
-| `S3_BUCKET` | `nyc-taxi` | *required* | |
-| `WAREHOUSE_DATABASE` | `./data/nyc_taxi.duckdb` | *required*, e.g. `md:nyc_taxi` | File path or `md:<db>` |
-| `WAREHOUSE_SCHEMA` | `nyc_taxi` | `zoomcamp` (existing data) | Schema for all tables |
-| `MOTHERDUCK_TOKEN` | — | env or block `motherduck-token` | Only for `md:` |
-| `TLC_BASE_URL` | CloudFront URL | same | TLC data root |
-
----
-
-## Checks
+## Tests
 
 ```bash
 uv run pytest -q
 uv run ruff check . && uv run ruff format --check .
 ```
-
-CI (`.github/workflows/ci.yml`) runs an import check, ruff and pytest on every
-push and pull request.
