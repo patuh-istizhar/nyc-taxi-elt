@@ -28,8 +28,7 @@ deployments:
         active: true
     work_pool:
       name: managed-pool
-      # The smoke deployment reuses this exact runtime through the YAML anchor.
-      job_variables: &prod_job
+      job_variables:
         # Keep in sync with pyproject.toml; duckdb must match a MotherDuck-supported version.
         pip_packages:
           - duckdb==1.5.6
@@ -45,11 +44,3 @@ deployments:
           WAREHOUSE_SCHEMA: zoomcamp
           # Keys come from Prefect Secret blocks:
           # s3-access-key-id, s3-secret-access-key, motherduck-token.
-
-  - name: smoke
-    description: "Connectivity check for S3 and the warehouse (prod)."
-    entrypoint: nyc_taxi_elt/flows/smoke.py:smoke
-    tags: ["nyc-taxi", "prod"]
-    work_pool:
-      name: managed-pool
-      job_variables: *prod_job

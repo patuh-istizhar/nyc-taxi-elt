@@ -12,3 +12,5 @@ dist/
 *.egg-info/
 .DS_Store
 *.parquet
+.env.*
+!.env.example

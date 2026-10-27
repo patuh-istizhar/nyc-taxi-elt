@@ -133,7 +133,6 @@ Deploy and run:
 
 ```bash
 uv run prefect deploy --all                                   # after every push that changes flows
-uv run prefect deployment run nyc-taxi-smoke/smoke
 uv run prefect deployment run nyc-taxi-ingest/weekly          # same as the schedule
 uv run prefect deployment run nyc-taxi-ingest/weekly \
   --param start_month=2023-01 --param end_month=2023-12       # backfill
@@ -141,8 +140,13 @@ uv run prefect deployment run nyc-taxi-ingest/weekly \
   --param start_month=2024-01 --param force=true              # reload one month
 ```
 
-You can also run prod from your machine: put the prod values in a `.env.prod`
-and use `uv run --env-file .env.prod python -m nyc_taxi_elt.flows.ingest ...`.
+Only the ingest flow is deployed. The smoke check runs from your machine against
+prod by putting the prod values in a `.env.prod` (ignored by git):
+
+```bash
+uv run --env-file .env.prod python -m nyc_taxi_elt.flows.smoke
+uv run --env-file .env.prod python -m nyc_taxi_elt.flows.ingest --month 2024-01   # also works
+```
 
 ---
 
